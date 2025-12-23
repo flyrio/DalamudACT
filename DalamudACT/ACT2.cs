@@ -26,20 +26,28 @@ namespace DalamudACT
         public Dictionary<uint, IDalamudTextureWrap?> Icon = new();
         public List<ACTBattle> Battles = new(5);
         private ExcelSheet<TerritoryType> terrySheet;
-        
+
         private delegate void ReceiveAbilityDelegate(int sourceId, nint sourceCharacter, nint pos,
             nint effectHeader, nint effectArray, nint effectTrail);
 
         private Hook<ReceiveAbilityDelegate> ReceiveAbilityHook;
 
-        private delegate void ActorControlSelfDelegate(uint entityId, ActorControlCategory id, uint arg0, uint arg1,
-            uint arg2, uint arg3, uint arg4, uint arg5, uint arg6, uint arg7, uint arg8, ulong targetId, byte a10);
+        // 更新：移除 arg8，与 JobBars 保持一致
+        private delegate void ActorControlSelfDelegate(
+            uint entityId,
+            uint id,
+            uint arg0,
+            uint arg1,
+            uint arg2,
+            uint arg3,
+            uint arg4,
+            uint arg5,
+            uint arg6,
+            uint arg7,
+            ulong targetId,
+            byte a10);
 
         private Hook<ActorControlSelfDelegate> ActorControlSelfHook;
-
-        //private delegate nint NpcSpawnDelegate(uint sourceId, nint sourceCharacter);
-
-        //private Hook<NpcSpawnDelegate> NpcSpawnHook;
 
         private delegate void CastDelegate(uint sourceId, nint sourceCharacter);
 
@@ -51,30 +59,30 @@ namespace DalamudACT
         private unsafe void Ability(nint headPtr, nint effectPtr, nint targetPtr, uint sourceId, int length)
         {
             DalamudApi.Log.Verbose($"-----------------------Ability{length}:{sourceId:X}------------------------------");
-            
+
             if (sourceId > 0x40000000)
                 sourceId = ACTBattle.GetOwner(sourceId);
-            
+
             if (sourceId is > 0x40000000 or 0x0) return;
 
             var header = Marshal.PtrToStructure<Header>(headPtr);
-            var effect = (EffectEntry*) effectPtr;
-            var target = (ulong*) targetPtr;
+            var effect = (EffectEntry*)effectPtr;
+            var target = (ulong*)targetPtr;
 
             for (var i = 0; i < length; i++)
             {
                 DalamudApi.Log.Verbose(
                     $"{*target:X} effect:{effect->type}:{effect->param0}:{effect->param1}:{effect->param2}:{effect->param3}:{effect->param4}:{effect->param5}");
                 if (*target == 0x0) break;
-                //DalamudApi.Log.Verbose($"{*target:X}");
+
                 for (var j = 0; j < 8; j++)
                 {
                     if (effect->type == 3) //damage
                     {
                         long damage = effect->param0;
                         if (effect->param5 == 0x40) damage += effect->param4 << 16;
-                        DalamudApi.Log.Verbose($"EffectEntry:{3},{sourceId:X}:{(uint) *target:X}:{header.actionId},{damage}");
-                        Battles[^1].AddEvent(EventKind.Damage, sourceId, (uint) *target, header.actionId, damage,
+                        DalamudApi.Log.Verbose($"EffectEntry:{3},{sourceId:X}:{(uint)*target:X}:{header.actionId},{damage}");
+                        Battles[^1].AddEvent(EventKind.Damage, sourceId, (uint)*target, header.actionId, damage,
                             effect->param1);
                     }
 
@@ -99,25 +107,36 @@ namespace DalamudACT
                     Battles[^1].AddSS(source, data.cast_time, data.action_id);
         }
 
-        private void ReceiveActorControlSelf(uint entityId, ActorControlCategory type, uint arg0, uint arg1, uint arg2,
+        // 更新：移除 arg8 参数
+        private void ReceiveActorControlSelf(
+            uint entityId,
+            uint type,
+            uint arg0,
+            uint arg1,
+            uint arg2,
             uint arg3,
-            uint arg4, uint arg5, uint arg6, uint arg7, uint arg8, ulong targetId, byte a10)
+            uint arg4,
+            uint arg5,
+            uint arg6,
+            uint arg7,
+            ulong targetId,
+            byte a10)
         {
-            //DalamudApi.Log.Verbose($"ReceiveActorControlSelf{entityId:X}:{type}:0={arg0}:1={arg1}:2={arg2}:3={arg3}:4={arg4}:5={arg5}:{targetId:X}:{a10}");
-            ActorControlSelfHook.Original(entityId, type, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, targetId, a10);
-            if (type == ActorControlCategory.Death && entityId < 0x40000000)
+            // 更新：移除 arg8
+            ActorControlSelfHook.Original(entityId, type, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, targetId, a10);
+
+            if (type == (uint)ActorControlCategory.Death && entityId < 0x40000000)
             {
                 Battles[^1].AddEvent(EventKind.Death, entityId, arg0, 0, 0);
                 DalamudApi.Log.Verbose($"{entityId:X} killed by {arg0:X}");
                 return;
             }
 
-            // actorid:death:id1:id2:?:?:?:?:E0000000:0
             if (entityId < 0x40000000) return;
             if (arg2 > 0x40000000) arg2 = ACTBattle.GetOwner(arg2);
             if (arg2 > 0x40000000) return;
 
-            if (type is ActorControlCategory.DoT)
+            if (type is (uint)ActorControlCategory.DoT)
             {
                 DalamudApi.Log.Verbose($"Dot:{arg0} from {arg2:X} ticked {arg1} damage on {entityId:X}");
                 if (arg0 != 0 && Potency.BuffToAction.TryGetValue(arg0, out arg0))
@@ -132,38 +151,28 @@ namespace DalamudACT
         private unsafe void ReceiveAbilityEffect(int sourceId, IntPtr sourceCharacter, IntPtr pos, IntPtr effectHeader,
             IntPtr effectArray, IntPtr effectTrail)
         {
-            var targetCount = *(byte*) (effectHeader + 0x21);
+            var targetCount = *(byte*)(effectHeader + 0x21);
             switch (targetCount)
             {
                 case <= 1:
-                    Ability(effectHeader, effectArray, effectTrail, (uint) sourceId, 1);
+                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 1);
                     break;
                 case <= 8 and > 1:
-                    Ability(effectHeader, effectArray, effectTrail, (uint) sourceId, 8);
+                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 8);
                     break;
                 case > 8 and <= 16:
-                    Ability(effectHeader, effectArray, effectTrail, (uint) sourceId, 16);
+                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 16);
                     break;
                 case > 16 and <= 24:
-                    Ability(effectHeader, effectArray, effectTrail, (uint) sourceId, 24);
+                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 24);
                     break;
                 case > 24 and <= 32:
-                    Ability(effectHeader, effectArray, effectTrail, (uint) sourceId, 32);
+                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 32);
                     break;
             }
 
             ReceiveAbilityHook.Original(sourceId, sourceCharacter, pos, effectHeader, effectArray, effectTrail);
         }
-
-        //private nint ReceiveNpcSpawn(uint target, nint ptr)
-        //{
-        //    var obj = Marshal.PtrToStructure<NpcSpawn>(ptr);
-        //    var result = NpcSpawnHook.Original(target, ptr);
-        //    DalamudApi.Log.Verbose($"Spawn:{target:X}:{obj.spawnerId:X}");
-        //    if (obj.spawnerId == 0xE0000000) return result;
-        //    ACTBattle.Pet[target] = obj.spawnerId;
-        //    return result;
-        //}
 
         #endregion
 
@@ -174,7 +183,6 @@ namespace DalamudACT
             if (Battles[^1].EndTime > 0 && !inCombat)
             {
                 Battles[^1].ActiveDots.Clear();
-                //新的战斗
                 if (Battles.Count == 5)
                 {
                     Battles.RemoveAt(0);
@@ -182,16 +190,13 @@ namespace DalamudACT
                 }
 
                 Battles.Add(new ACTBattle(0, 0));
-                //ACTBattle.SearchForPet();
             }
 
             if (DalamudApi.ObjectTable.LocalPlayer != null && inCombat)
             {
-                //开始战斗
                 if (Battles[^1].StartTime is 0) Battles[^1].StartTime = now;
                 Battles[^1].EndTime = now;
                 Battles[^1].Zone = GetPlaceName();
-
 
                 PluginUI.choosed = Battles.Count - 1;
             }
@@ -235,7 +240,8 @@ namespace DalamudACT
             terrySheet = DalamudApi.GameData.GetExcelSheet<TerritoryType>()!;
             ACTBattle.ActionSheet = DalamudApi.GameData.GetExcelSheet<Action>()!;
 
-            for (uint i = 62100; i <= 62100 + 42; i++) Icon.Add(i - 62100, DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(i)).RentAsync().Result);
+            for (uint i = 62100; i <= 62100 + 42; i++)
+                Icon.Add(i - 62100, DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(i)).RentAsync().Result);
 
             Icon.Add(99, DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(103)).RentAsync().Result); //LB
 
@@ -246,28 +252,24 @@ namespace DalamudACT
 
             #region Hook
             {
+                // ReceiveAbility 签名保持不变
                 ReceiveAbilityHook = DalamudApi.Interop.HookFromAddress<ReceiveAbilityDelegate>(
                     DalamudApi.SigScanner.ScanText("40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ??"),
                     ReceiveAbilityEffect);
                 ReceiveAbilityHook.Enable();
-                //40 55 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 41 0F B7 80 ? ? ? ?  最后函数
 
+                // ActorControlSelf - 签名可能需要更新，请根据实际版本调整
                 ActorControlSelfHook = DalamudApi.Interop.HookFromAddress<ActorControlSelfDelegate>(
-                    DalamudApi.SigScanner.ScanText("E8 ?? ?? ?? ?? 0F B7 0B 83 E9 64 "), ReceiveActorControlSelf);
+                    DalamudApi.SigScanner.ScanText("E8 ?? ?? ?? ?? 0F B7 0B 83 E9 64"),
+                    ReceiveActorControlSelf);
                 ActorControlSelfHook.Enable();
 
-                //var SpawnSig = "E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 50 5F C3 8B 4F 08 48 8B D3 E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 50 5F C3 8B 4F 08 48 8B D3 E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 50 5F C3 8B 4F 08 48 8B D3 E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 50 5F C3 8B 4F 08 48 8B D3 E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 50 5F C3 0F B7 13";
-                //NpcSpawnHook = DalamudApi.Interop.HookFromAddress<NpcSpawnDelegate>(
-                //    DalamudApi.SigScanner.ScanText(SpawnSig),
-                //    ReceiveNpcSpawn);
-                //NpcSpawnHook.Enable();
-
+                // Cast 签名保持不变
                 CastHook = DalamudApi.Interop.HookFromAddress<CastDelegate>(
-                    DalamudApi.SigScanner.ScanText("40 53 57 48 81 EC ?? ?? ?? ?? 48 8B FA 8B D1"), StartCast);
+                    DalamudApi.SigScanner.ScanText("40 53 57 48 81 EC ?? ?? ?? ?? 48 8B FA 8B D1"),
+                    StartCast);
                 CastHook.Enable();
-                //E8 ? ? ? ? 84 C0 75 12 0F 57 C0 第一个
             }
-
             #endregion
 
             DalamudApi.Framework.Update += Update;
@@ -282,17 +284,13 @@ namespace DalamudACT
             DalamudApi.PluginInterface.UiBuilder.Draw += DrawUI;
             DalamudApi.PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUI;
             DalamudApi.PluginInterface.UiBuilder.OpenMainUi += DrawMainUI;
-
-            //DalamudApi.Log.Warning($"-{DalamudApi.GameData.Excel.GetSheet<World>()!.GetRow(1081)!.IsPublic}");
         }
-        
+
         public void Disable()
         {
             ActorControlSelfHook.Disable();
             ReceiveAbilityHook.Disable();
-            //NpcSpawnHook.Disable();
             CastHook.Disable();
-            //EffectHook.Disable();
         }
 
         public void Dispose()
@@ -303,7 +301,6 @@ namespace DalamudACT
             Disable();
             ActorControlSelfHook.Dispose();
             ReceiveAbilityHook.Dispose();
-            //NpcSpawnHook.Dispose();
             CastHook.Dispose();
         }
 
@@ -312,7 +309,7 @@ namespace DalamudACT
             switch (args)
             {
                 case null or "":
-                    PluginUi.mainWindow.IsOpen = true; 
+                    PluginUi.mainWindow.IsOpen = true;
                     break;
                 case "config":
                     PluginUi.configWindow.IsOpen = true;

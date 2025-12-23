@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<Project Sdk="Dalamud.NET.Sdk/14.0.0">
+<Project Sdk="Dalamud.CN.NET.Sdk/14.0.1">
 
   <PropertyGroup>
     <AssemblyVersion>0.14.0.0</AssemblyVersion>
@@ -35,7 +35,7 @@
   </ItemGroup>-->
 
   <PropertyGroup>
-    <DalamudLibPath>$(APPDATA)\XIVLauncher\addon\Hooks\dev\</DalamudLibPath>
+    <DalamudLibPath>$(APPDATA)\XIVLauncherCN\addon\Hooks\dev\</DalamudLibPath>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <PlatformTarget>AnyCPU</PlatformTarget>
   </PropertyGroup>
@@ -65,6 +65,11 @@
     <None Update="DDD.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <PackageReference Update="DalamudPackager" Version="14.0.1" />
   </ItemGroup>
   
 </Project>
