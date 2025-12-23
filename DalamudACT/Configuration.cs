@@ -13,9 +13,18 @@ namespace DalamudACT
         public Vector2 WindowSize = Vector2.One;
         public bool HideName;
         public bool Mini;
-        public int BGColor = 100;
+        public int BGColor = 30;
         public bool delta = false;
         public bool autohide = false;
+        public bool ClickThrough = false;
+
+        public bool ShowRates = true;
+        public bool HighlightSelf = true;
+        public bool AutoCompact = true;
+        public bool CompactMode = false;
+        public int SortMode = 0; // 0=秒伤 1=总伤害 2=姓名
+        public int TopN = 0; // 0=全部
+        public int TableLayoutSeed = 0;
 
         public bool SaveData = false;
         public int SaveTime = 30;

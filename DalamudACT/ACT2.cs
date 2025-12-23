@@ -18,7 +18,9 @@ namespace DalamudACT
 {
     public class ACT : IDalamudPlugin
     {
-        public string Name => "Dalamud Damage Display";
+        public string Name => "伤害统计";
+
+        public object SyncRoot { get; } = new();
 
         public Configuration Configuration;
         private PluginUI PluginUi;
@@ -69,27 +71,30 @@ namespace DalamudACT
             var effect = (EffectEntry*)effectPtr;
             var target = (ulong*)targetPtr;
 
-            for (var i = 0; i < length; i++)
+            lock (SyncRoot)
             {
-                DalamudApi.Log.Verbose(
-                    $"{*target:X} effect:{effect->type}:{effect->param0}:{effect->param1}:{effect->param2}:{effect->param3}:{effect->param4}:{effect->param5}");
-                if (*target == 0x0) break;
-
-                for (var j = 0; j < 8; j++)
+                for (var i = 0; i < length; i++)
                 {
-                    if (effect->type == 3) //damage
+                    DalamudApi.Log.Verbose(
+                        $"{*target:X} effect:{effect->type}:{effect->param0}:{effect->param1}:{effect->param2}:{effect->param3}:{effect->param4}:{effect->param5}");
+                    if (*target == 0x0) break;
+
+                    for (var j = 0; j < 8; j++)
                     {
-                        long damage = effect->param0;
-                        if (effect->param5 == 0x40) damage += effect->param4 << 16;
-                        DalamudApi.Log.Verbose($"EffectEntry:{3},{sourceId:X}:{(uint)*target:X}:{header.actionId},{damage}");
-                        Battles[^1].AddEvent(EventKind.Damage, sourceId, (uint)*target, header.actionId, damage,
-                            effect->param1);
+                        if (effect->type == 3) //damage
+                        {
+                            long damage = effect->param0;
+                            if (effect->param5 == 0x40) damage += effect->param4 << 16;
+                            DalamudApi.Log.Verbose($"EffectEntry:{3},{sourceId:X}:{(uint)*target:X}:{header.actionId},{damage}");
+                            Battles[^1].AddEvent(EventKind.Damage, sourceId, (uint)*target, header.actionId, damage,
+                                effect->param1);
+                        }
+
+                        effect++;
                     }
 
-                    effect++;
+                    target++;
                 }
-
-                target++;
             }
 
             DalamudApi.Log.Verbose("------------------------END------------------------------");
@@ -103,8 +108,9 @@ namespace DalamudACT
             DalamudApi.Log.Verbose(
                 $"Cast:{source:X}:{data.skillType}:{data.action_id}:{data.cast_time}:{data.flag}:{data.unknown_2:X}:{data.unknown_3}");
             if (data.skillType == 1 && Potency.SkillPot.ContainsKey(data.action_id))
-                if (Battles[^1].DataDic.TryGetValue(source, out _))
-                    Battles[^1].AddSS(source, data.cast_time, data.action_id);
+                lock (SyncRoot)
+                    if (Battles[^1].DataDic.TryGetValue(source, out _))
+                        Battles[^1].AddSS(source, data.cast_time, data.action_id);
         }
 
         // 更新：移除 arg8 参数
@@ -127,7 +133,8 @@ namespace DalamudACT
 
             if (type == (uint)ActorControlCategory.Death && entityId < 0x40000000)
             {
-                Battles[^1].AddEvent(EventKind.Death, entityId, arg0, 0, 0);
+                lock (SyncRoot)
+                    Battles[^1].AddEvent(EventKind.Death, entityId, arg0, 0, 0);
                 DalamudApi.Log.Verbose($"{entityId:X} killed by {arg0:X}");
                 return;
             }
@@ -139,12 +146,17 @@ namespace DalamudACT
             if (type is (uint)ActorControlCategory.DoT)
             {
                 DalamudApi.Log.Verbose($"Dot:{arg0} from {arg2:X} ticked {arg1} damage on {entityId:X}");
-                if (arg0 != 0 && Potency.BuffToAction.TryGetValue(arg0, out arg0))
+                lock (SyncRoot)
                 {
-                    Battles[^1].AddEvent(EventKind.Damage, arg2, entityId, arg0, arg1);
+                    if (arg0 != 0 && Potency.BuffToAction.TryGetValue(arg0, out arg0))
+                    {
+                        Battles[^1].AddEvent(EventKind.Damage, arg2, entityId, arg0, arg1);
+                    }
+                    else
+                    {
+                        Battles[^1].AddEvent(EventKind.Damage, 0xE000_0000, entityId, 0, arg1);
+                    }
                 }
-                else
-                    Battles[^1].AddEvent(EventKind.Damage, 0xE000_0000, entityId, 0, arg1);
             }
         }
 
@@ -180,25 +192,25 @@ namespace DalamudACT
         {
             var inCombat = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
             var now = DateTimeOffset.Now.ToUnixTimeSeconds();
-            if (Battles[^1].EndTime > 0 && !inCombat)
+            lock (SyncRoot)
             {
-                Battles[^1].ActiveDots.Clear();
-                if (Battles.Count == 5)
+                if (Battles[^1].EndTime > 0 && !inCombat)
                 {
-                    Battles.RemoveAt(0);
-                    PluginUI.choosed--;
+                    Battles[^1].ActiveDots.Clear();
+                    if (Battles.Count == 5)
+                    {
+                        Battles.RemoveAt(0);
+                    }
+
+                    Battles.Add(new ACTBattle(0, 0));
                 }
 
-                Battles.Add(new ACTBattle(0, 0));
-            }
-
-            if (DalamudApi.ObjectTable.LocalPlayer != null && inCombat)
-            {
-                if (Battles[^1].StartTime is 0) Battles[^1].StartTime = now;
-                Battles[^1].EndTime = now;
-                Battles[^1].Zone = GetPlaceName();
-
-                PluginUI.choosed = Battles.Count - 1;
+                if (DalamudApi.ObjectTable.LocalPlayer != null && inCombat)
+                {
+                    if (Battles[^1].StartTime is 0) Battles[^1].StartTime = now;
+                    Battles[^1].EndTime = now;
+                    Battles[^1].Zone = GetPlaceName();
+                }
             }
         }
 

@@ -199,7 +199,7 @@ public class ACTBattle
         if (from != 0xE0000000 && eventKind == EventKind.Damage)
         {
 
-            if (ActionSheet!.GetRow(id).PrimaryCostType == 11) //LimitBreak
+            if (ActionSheet != null && ActionSheet.TryGetRow(id, out var actionRow) && actionRow.PrimaryCostType == 11) //LimitBreak
             {
                 if (LimitBreak.ContainsKey(id)) LimitBreak[id] += damage;
                 else LimitBreak.Add(id,damage);
@@ -226,8 +226,6 @@ public class ACTBattle
                 else
                 {
                     DataDic[from].Damages.Add(id, new SkillDamage(damage));
-                    PluginUI.Icon.TryAdd(id,
-                        DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(ActionSheet!.GetRow(id)!.Icon)).RentAsync().Result);
                 }
 
                 if (DataDic[from].MaxDamage < damage)
@@ -272,6 +270,7 @@ public class ACTBattle
     {
         long result = 1;
         if (DataDic[actor].Damages.TryGetValue(DataDic[actor].PotSkill, out var dmg)) result = dmg.Damage;
+        if (result <= 0 || DataDic[actor].SkillPotency <= 0) return 0;
         return result * DataDic[actor].Speed / DataDic[actor].SkillPotency;
     }
 

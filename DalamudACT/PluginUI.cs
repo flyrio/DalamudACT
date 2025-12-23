@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Interface.Textures;
@@ -19,24 +21,215 @@ namespace DalamudACT;
 
 internal class PluginUI : IDisposable
 {
+    private static PluginUI? instance;
+
     private static Configuration config;
 
     private static ACT _plugin;
     public static int choosed;
     private static ExcelSheet<Action> sheet = DalamudApi.GameData.GetExcelSheet<Action>()!;
-    public static Dictionary<uint, IDalamudTextureWrap?> Icon = new();
+    public static ConcurrentDictionary<uint, IDalamudTextureWrap?> Icon = new();
     private static ExcelSheet<Status> buffSheet = DalamudApi.GameData.GetExcelSheet<Status>()!;
-    public static Dictionary<uint, IDalamudTextureWrap?> BuffIcon = new();
-    private static Dictionary<uint, float> DotDictionary;
+    public static ConcurrentDictionary<uint, IDalamudTextureWrap?> BuffIcon = new();
+
+    private static readonly ConcurrentDictionary<uint, Task<IDalamudTextureWrap>> IconTasks = new();
+    private static readonly ConcurrentDictionary<uint, Task<IDalamudTextureWrap>> BuffIconTasks = new();
+    private static volatile bool disposing;
+
     private static IDalamudTextureWrap? mainIcon;
 
     public ConfigWindow configWindow;
     public DebugWindow debugWindow;
     public MainWindow mainWindow;
-    public WindowSystem WindowSystem = new("ACT");
+    public WindowSystem WindowSystem = new("伤害统计");
+
+    private static void EnsureActionIcon(uint actionId)
+    {
+        if (disposing || Icon.ContainsKey(actionId)) return;
+        if (!sheet.TryGetRow(actionId, out var row) || row.Icon == 0)
+        {
+            Icon.TryAdd(actionId, null);
+            return;
+        }
+
+        IconTasks.GetOrAdd(actionId, __ =>
+        {
+            var task = DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(row.Icon)).RentAsync();
+            _ = task.ContinueWith(t =>
+            {
+                IconTasks.TryRemove(actionId, out _);
+                if (t.Status != TaskStatus.RanToCompletion) return;
+                if (disposing)
+                {
+                    t.Result.Dispose();
+                    return;
+                }
+
+                Icon[actionId] = t.Result;
+            }, TaskScheduler.Default);
+
+            return task;
+        });
+    }
+
+    private static void EnsureBuffIcon(uint buffId)
+    {
+        if (disposing || BuffIcon.ContainsKey(buffId)) return;
+        if (!buffSheet.TryGetRow(buffId, out var row) || row.Icon == 0)
+        {
+            BuffIcon.TryAdd(buffId, null);
+            return;
+        }
+
+        BuffIconTasks.GetOrAdd(buffId, __ =>
+        {
+            var task = DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(row.Icon)).RentAsync();
+            _ = task.ContinueWith(t =>
+            {
+                BuffIconTasks.TryRemove(buffId, out _);
+                if (t.Status != TaskStatus.RanToCompletion) return;
+                if (disposing)
+                {
+                    t.Result.Dispose();
+                    return;
+                }
+
+                BuffIcon[buffId] = t.Result;
+            }, TaskScheduler.Default);
+
+            return task;
+        });
+    }
+
+    private static int PushBackgroundAlpha(float alpha)
+    {
+        alpha = Math.Clamp(alpha, 0f, 1f);
+        var style = ImGui.GetStyle();
+
+        Vector4 ScaleAlpha(Vector4 c) => new(c.X, c.Y, c.Z, c.W * alpha);
+
+        var cols = new[]
+        {
+            ImGuiCol.ChildBg,
+            ImGuiCol.PopupBg,
+            ImGuiCol.Border,
+            ImGuiCol.BorderShadow,
+            ImGuiCol.FrameBg,
+            ImGuiCol.FrameBgHovered,
+            ImGuiCol.FrameBgActive,
+            ImGuiCol.TitleBg,
+            ImGuiCol.TitleBgActive,
+            ImGuiCol.TitleBgCollapsed,
+            ImGuiCol.MenuBarBg,
+            ImGuiCol.ScrollbarBg,
+            ImGuiCol.ScrollbarGrab,
+            ImGuiCol.ScrollbarGrabHovered,
+            ImGuiCol.ScrollbarGrabActive,
+            ImGuiCol.SliderGrab,
+            ImGuiCol.SliderGrabActive,
+            ImGuiCol.Button,
+            ImGuiCol.ButtonHovered,
+            ImGuiCol.ButtonActive,
+            ImGuiCol.Header,
+            ImGuiCol.HeaderHovered,
+            ImGuiCol.HeaderActive,
+            ImGuiCol.Separator,
+            ImGuiCol.SeparatorHovered,
+            ImGuiCol.SeparatorActive,
+            ImGuiCol.ResizeGrip,
+            ImGuiCol.ResizeGripHovered,
+            ImGuiCol.ResizeGripActive,
+            ImGuiCol.Tab,
+            ImGuiCol.TabHovered,
+            ImGuiCol.TabActive,
+            ImGuiCol.TabUnfocused,
+            ImGuiCol.TabUnfocusedActive,
+            ImGuiCol.DockingPreview,
+            ImGuiCol.DockingEmptyBg,
+            ImGuiCol.TableRowBg,
+            ImGuiCol.TableRowBgAlt,
+            ImGuiCol.TableHeaderBg,
+            ImGuiCol.TableBorderStrong,
+            ImGuiCol.TableBorderLight,
+        };
+
+        var pushCount = 0;
+        foreach (var col in cols)
+        {
+            ImGui.PushStyleColor(col, ScaleAlpha(style.Colors[(int)col]));
+            pushCount++;
+        }
+
+        return pushCount;
+    }
+
+    private static int PushReadablePopupStyle(float minAlpha = 1.0f)
+    {
+        minAlpha = Math.Clamp(minAlpha, 0f, 1f);
+        var style = ImGui.GetStyle();
+
+        var popupBg = style.Colors[(int)ImGuiCol.PopupBg];
+        var border = style.Colors[(int)ImGuiCol.Border];
+
+        var bgAlpha = Math.Max(popupBg.W, minAlpha);
+        var borderAlpha = Math.Max(border.W, Math.Min(1f, bgAlpha));
+
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, new Vector4(popupBg.X, popupBg.Y, popupBg.Z, bgAlpha));
+        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(border.X, border.Y, border.Z, borderAlpha));
+        return 2;
+    }
+
+    private static string JobNameCn(uint jobId)
+        => jobId switch
+        {
+            1 => "剑术师",
+            2 => "格斗家",
+            3 => "斧术师",
+            4 => "枪术师",
+            5 => "弓箭手",
+            6 => "幻术师",
+            7 => "咒术师",
+            8 => "刻木匠",
+            9 => "锻铁匠",
+            10 => "铸甲匠",
+            11 => "雕金匠",
+            12 => "制革匠",
+            13 => "裁衣匠",
+            14 => "炼金术士",
+            15 => "烹调师",
+            16 => "采矿工",
+            17 => "园艺工",
+            18 => "捕鱼人",
+            19 => "骑士",
+            20 => "武僧",
+            21 => "战士",
+            22 => "龙骑士",
+            23 => "吟游诗人",
+            24 => "白魔法师",
+            25 => "黑魔法师",
+            26 => "秘术师",
+            27 => "召唤师",
+            28 => "学者",
+            29 => "双剑师",
+            30 => "忍者",
+            31 => "机工士",
+            32 => "暗黑骑士",
+            33 => "占星术士",
+            34 => "武士",
+            35 => "赤魔法师",
+            36 => "青魔法师",
+            37 => "绝枪战士",
+            38 => "舞者",
+            39 => "钐镰客",
+            40 => "贤者",
+            41 => "蝰蛇剑士",
+            42 => "绘灵法师",
+            _ => ((Job)jobId).ToString()
+        };
 
     public PluginUI(ACT p)
     {
+        instance = this;
         _plugin = p;
         config = p.Configuration;
 
@@ -59,6 +252,8 @@ internal class PluginUI : IDisposable
 
     public void Dispose()
     {
+        disposing = true;
+        instance = null;
         foreach (var (_, texture) in Icon) texture?.Dispose();
 
         foreach (var (_, texture) in BuffIcon) texture?.Dispose();
@@ -73,125 +268,181 @@ internal class PluginUI : IDisposable
     public class ConfigWindow : Window, IDisposable
     {
 
-        public ConfigWindow(ACT plugin) : base("ACT Config Window", ImGuiWindowFlags.AlwaysAutoResize, false)
+        public ConfigWindow(ACT plugin) : base("伤害统计 - 设置", ImGuiWindowFlags.AlwaysAutoResize, false)
         {
 
         }
 
         public override void Draw()
         {
-            var changed = false;
-            changed |= ImGui.Checkbox("Lock MainWindow Position", ref config.Lock);
-            changed |= ImGui.Checkbox("No Resize", ref config.NoResize);
-            changed |= ImGui.DragInt("BackGround Alpha", ref config.BGColor, 1, 1, 1);
-            changed |= ImGui.Checkbox("Show Delta", ref config.delta);
-
-            //ImGui.Separator();
-
-            //changed |= ImGui.Checkbox("存储最近战斗数据", ref config.SaveData);
-            //if (config.SaveData)
-            //{
-            //    changed |= ImGui.InputInt("储存时长", ref config.SaveTime, 1);
-            //    if (config.SaveTime < 0) config.SaveTime = 0;
-            //    if (config.SaveTime > 120) config.SaveTime = 120;
-            //    changed |= ImGui.InputInt("计算时长", ref config.CalcTime, 1);
-            //    if (config.CalcTime < 0) config.CalcTime = 0;
-            //    if (config.CalcTime > config.SaveTime) config.CalcTime = config.SaveTime;
-            //}
-
-            if (changed) config.Save();
-            unsafe
+            BgAlpha = 1f;
+            try
             {
-                var ptr = *(nint*)((nint)FFXIVClientStructs.FFXIV.Client.System.Framework.GameWindow.Instance() + 0xA8);
-                ImGui.Text(ptr.ToString());
-                ImGui.Text(Marshal.PtrToStringUTF8(ptr));
-            }
+                var changed = false;
+                if (ImGui.CollapsingHeader("窗口", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    changed |= ImGui.Checkbox("禁止调整大小", ref config.NoResize);
+                    changed |= ImGui.Checkbox("鼠标穿透（按住 Alt 临时操作）", ref config.ClickThrough);
+                    changed |= ImGui.SliderInt("背景透明度（不影响文字）", ref config.BGColor, 0, 100);
 
-            ImGui.Text(DalamudApi.ClientState.TerritoryType.ToString());
-            ImGui.Text(DalamudApi.GameData.GetExcelSheet<ContentMemberType>().Count.ToString());
+                    if (ImGui.Button("重置窗口大小"))
+                    {
+                        config.WindowSize = new Vector2(480, 320);
+                        changed = true;
+                    }
+                }
+
+                if (ImGui.CollapsingHeader("显示", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    changed |= ImGui.Checkbox("隐藏玩家姓名（用职业名代替）", ref config.HideName);
+                    changed |= ImGui.SliderInt("仅显示前 N 名（0=全部）", ref config.TopN, 0, 24);
+                    changed |= ImGui.Checkbox("显示直击/暴击/直爆列", ref config.ShowRates);
+                    changed |= ImGui.Checkbox("高亮自己", ref config.HighlightSelf);
+                    changed |= ImGui.Checkbox("自动紧凑布局（窄窗口隐藏部分列）", ref config.AutoCompact);
+                    if (!config.AutoCompact)
+                        changed |= ImGui.Checkbox("手动紧凑模式", ref config.CompactMode);
+
+                    var sortModes = new[] { "按秒伤", "按总伤害", "按姓名" };
+                    var sortMode = config.SortMode;
+                    if (ImGui.Combo("排序方式", ref sortMode, sortModes, sortModes.Length))
+                    {
+                        config.SortMode = sortMode;
+                        changed = true;
+                    }
+
+                    if (ImGui.Button("重置列宽"))
+                    {
+                        config.TableLayoutSeed++;
+                        changed = true;
+                    }
+                }
+
+                if (ImGui.CollapsingHeader("战斗", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    changed |= ImGui.Checkbox("最小化模式", ref config.Mini);
+                    changed |= ImGui.Checkbox("战斗外自动最小化", ref config.autohide);
+                    changed |= ImGui.Checkbox("显示 DoT 模拟偏差", ref config.delta);
+                }
+
+                if (changed) config.Save();
+
+                if (ImGui.CollapsingHeader("调试信息"))
+                {
+                    unsafe
+                    {
+                        var ptr = *(nint*)((nint)FFXIVClientStructs.FFXIV.Client.System.Framework.GameWindow.Instance() + 0xA8);
+                        ImGui.Text(ptr.ToString());
+                        ImGui.Text(Marshal.PtrToStringUTF8(ptr));
+                    }
+
+                    ImGui.Text($"区域：{DalamudApi.ClientState.TerritoryType}");
+                    ImGui.Text($"ContentMemberType 表行数：{DalamudApi.GameData.GetExcelSheet<ContentMemberType>().Count}");
+                }
+            }
+            finally
+            {
+            }
 
         }
 
         public void Dispose()
         {
-            
+
         }
     }
 
     public class DebugWindow : Window, IDisposable
     {
 
-        public DebugWindow(ACT plugin) : base("ACT Debug Window")
+        public DebugWindow(ACT plugin) : base("伤害统计 - 调试")
         {
 
         }
 
         public override void Draw()
         {
-            ImGui.Text(
-                $"Total Dot DPS:{_plugin.Battles[choosed].TotalDotDamage / _plugin.Battles[choosed].Duration()}");
-
-            if (ImGui.BeginTable("Pot", 6))
+            BgAlpha = Math.Clamp(config.BGColor / 100f, 0f, 1f);
+            var popStyle = PushBackgroundAlpha(config.BGColor / 100f);
+            try
             {
-                var headers = new string[]
-                    {"Name", "ActorId", "PotSkill", "SkillPotency", "Speed", "DPP"};
+            lock (_plugin.SyncRoot)
+            {
+                if (_plugin.Battles.Count < 1) return;
+                choosed = Math.Clamp(choosed, 0, _plugin.Battles.Count - 1);
+                var battle = _plugin.Battles[choosed];
+
+                ImGui.Text($"持续伤害秒伤：{(float)battle.TotalDotDamage / battle.Duration():F1}");
+
+            if (ImGui.BeginTable("Pot", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
+            {
+                var headers = new[] { "姓名", "对象ID", "参考技能", "技能威力", "速度倍率", "伤害/威力" };
                 foreach (var t in headers) ImGui.TableSetupColumn(t);
                 ImGui.TableHeadersRow();
 
-                foreach (var (actor, damage) in _plugin.Battles[choosed].DataDic)
+                foreach (var (actor, damage) in battle.DataDic)
                 {
+                    ImGui.TableNextRow();
                     ImGui.TableNextColumn();
-                    ImGui.Text($"{_plugin.Battles[choosed].Name[actor]}");
+                    ImGui.Text($"{battle.Name.GetValueOrDefault(actor, actor.ToString("X"))}");
                     ImGui.TableNextColumn();
                     ImGui.Text($"{actor:X}");
                     ImGui.TableNextColumn();
-                    ImGui.Text($"{sheet.GetRow(damage.PotSkill)!.Name}");
+                    ImGui.Text($"{(sheet.TryGetRow(damage.PotSkill, out var potRow) ? potRow.Name.ExtractText() : damage.PotSkill.ToString())}");
                     ImGui.TableNextColumn();
-                    ImGui.Text($"{damage.SkillPotency}");
+                    ImGui.Text($"{damage.SkillPotency:F1}");
                     ImGui.TableNextColumn();
-                    ImGui.Text($"{damage.Speed}");
+                    ImGui.Text($"{damage.Speed:F3}");
                     ImGui.TableNextColumn();
-                    ImGui.Text($"{_plugin.Battles[choosed].DPP(actor)}");
+                    ImGui.Text($"{battle.DPP(actor):F3}");
                 }
+
+                ImGui.EndTable();
             }
 
-            ImGui.EndTable();
             ImGui.Separator();
 
-            ImGui.BeginTable("Dots", 5);
+            if (ImGui.BeginTable("Dots", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
             {
-                var headers = new string[] { "BuffId", "Source", "Potency", "Simulated DPS", "Split DPS" };
+                var headers = new string[] { "状态", "来源", "权重", "模拟秒伤", "分摊秒伤" };
 
                 foreach (var t in headers) ImGui.TableSetupColumn(t);
 
                 ImGui.TableHeadersRow();
                 var total = 0f;
-                foreach (var (active, potency) in _plugin.Battles[choosed].PlayerDotPotency)
+                foreach (var (active, potency) in battle.PlayerDotPotency)
                 {
                     var source = (uint)(active & 0xFFFFFFFF);
-                    total += _plugin.Battles[choosed].DPP(source) * potency;
+                    total += battle.DPP(source) * potency;
                 }
 
-                foreach (var (active, potency) in _plugin.Battles[choosed].PlayerDotPotency)
+                foreach (var (active, potency) in battle.PlayerDotPotency)
                 {
+                    ImGui.TableNextRow();
                     ImGui.TableNextColumn();
                     var buff = (uint)(active >> 32);
                     var source = (uint)(active & 0xFFFFFFFF);
-                    ImGui.Text($"{buffSheet.GetRow(buff)!.Name}");
+                    ImGui.Text($"{(buffSheet.TryGetRow(buff, out var buffRow) ? buffRow.Name.ExtractText() : buff.ToString())}");
                     ImGui.TableNextColumn();
-                    ImGui.Text($"{_plugin.Battles[choosed].Name[source]}");
+                    ImGui.Text($"{battle.Name.GetValueOrDefault(source, source.ToString("X"))}");
                     ImGui.TableNextColumn();
                     ImGui.Text($"{potency}");
                     ImGui.TableNextColumn();
                     ImGui.Text(
-                        $"{_plugin.Battles[choosed].DPP(source) * potency / _plugin.Battles[choosed].Duration()}");
+                        $"{battle.DPP(source) * potency / battle.Duration():F1}");
                     ImGui.TableNextColumn();
                     ImGui.Text(
-                        $"{_plugin.Battles[choosed].TotalDotDamage * _plugin.Battles[choosed].DPP(source) * potency / total / _plugin.Battles[choosed].Duration()}");
+                        $"{(total <= 0 ? 0 : battle.TotalDotDamage * battle.DPP(source) * potency / total / battle.Duration()):F1}");
                 }
 
                 ImGui.EndTable();
-                ImGui.Text($"模拟DPS/实际DPS:{total * 100 / _plugin.Battles[choosed].TotalDotDamage - 100}%%");
+                if (battle.TotalDotDamage > 0 && total > 0)
+                    ImGui.Text($"模拟与实际秒伤偏差：{total * 100 / battle.TotalDotDamage - 100:F2}%");
+            }
+            }
+            }
+            finally
+            {
+                ImGui.PopStyleColor(popStyle);
             }
 
         }
@@ -207,71 +458,318 @@ internal class PluginUI : IDisposable
         private List<Dictionary<uint, long>> savedBattle = new();
         private long startTime = 0;
         private long lastTime = 0;
+        private string filter = string.Empty;
+        private static readonly string[] SortModes = { "按秒伤", "按总伤害", "按姓名" };
+        private static readonly WindowSizeConstraints NormalConstraints = new()
+        {
+            MinimumSize = new Vector2(200, 120),
+            MaximumSize = new Vector2(3000, 3000),
+        };
 
-        public MainWindow(ACT plugin) : base("ACT Main Window")
+        private static readonly WindowSizeConstraints MiniConstraints = new()
+        {
+            MinimumSize = new Vector2(1, 1),
+            MaximumSize = new Vector2(200, 200),
+        };
+
+        private bool pendingRestore;
+        private Vector2 pendingRestoreSize;
+        private bool wasForcedMini;
+        private bool wasInMiniMode;
+
+        public MainWindow(ACT plugin) : base("伤害统计")
         {
             Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.MenuBar | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar;
+            SizeConstraints = NormalConstraints;
         }
 
         public override void Draw()
         {
             
             if (DalamudApi.Conditions[ConditionFlag.PvPDisplayActive]) return;
-            if (config.Mini)
+            var inCombat = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
+            var forceMini = config.autohide && !inCombat;
+            var inMiniModeNow = config.Mini || forceMini;
+
+            if (!wasInMiniMode && inMiniModeNow)
             {
-                DrawMini();
+                var beforeMiniSize = ImGui.GetWindowSize();
+                if (beforeMiniSize.X > 200 && beforeMiniSize.Y > 120)
+                    config.WindowSize = beforeMiniSize;
+            }
+
+            if (!inMiniModeNow && wasInMiniMode)
+            {
+                var restoreSize = config.WindowSize;
+                if (restoreSize.X < 200 || restoreSize.Y < 120)
+                    restoreSize = new Vector2(480, 320);
+                pendingRestore = true;
+                pendingRestoreSize = restoreSize;
+            }
+
+            wasInMiniMode = inMiniModeNow;
+            wasForcedMini = forceMini;
+
+            if (inMiniModeNow)
+            {
+                SizeConstraints = MiniConstraints;
+                DrawMini(forceMini);
                 return;
             }
-            if (_plugin.Battles.Count < 1) return;
+            SizeConstraints = NormalConstraints;
+            lock (_plugin.SyncRoot)
+            {
+                if (_plugin.Battles.Count < 1) return;
+                if (inCombat && _plugin.Battles[^1].StartTime != 0) choosed = _plugin.Battles.Count - 1;
+                choosed = Math.Clamp(choosed, 0, _plugin.Battles.Count - 1);
+            var clickThroughActive = config.ClickThrough && !ImGui.GetIO().KeyAlt;
             Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.MenuBar | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar |
                     (config.NoResize ? ImGuiWindowFlags.NoResize : ImGuiWindowFlags.None) |
-                    (config.Lock ? ImGuiWindowFlags.NoMove : ImGuiWindowFlags.None);
-            BgAlpha = config.BGColor / 100f;
+                    (clickThroughActive ? ImGuiWindowFlags.NoInputs : ImGuiWindowFlags.None);
+            BgAlpha = Math.Clamp(config.BGColor / 100f, 0f, 1f);
+
+            var popStyle = PushBackgroundAlpha(config.BGColor / 100f);
+            try
             {
-                var battle = _plugin.Battles[choosed];
-                var seconds = battle.Duration();
-                if (ImGui.BeginMenuBar())
+                var restoringThisFrame = false;
+                if (pendingRestore)
                 {
-                    if (ImGui.ArrowButton("Mini", ImGuiDir.Left))
-                    {
-                        config.Mini = !config.Mini;
-                        config.WindowSize = ImGui.GetWindowSize();
-                        config.Save();
-                        return;
-                    }
-
-                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("最小化");
-                    ImGui.SameLine();
-                    var items = new[] { "", "", "", "", "", "" };
-                    for (var i = 0; i < _plugin.Battles.Count - 1; i++)
-                        items[i] =
-                            $"{DateTimeOffset.FromUnixTimeSeconds(_plugin.Battles[i].StartTime).ToLocalTime():t}-{DateTimeOffset.FromUnixTimeSeconds(_plugin.Battles[i].EndTime).ToLocalTime():t} {_plugin.Battles[i].Zone}";
-                    try
-                    {
-                        items[_plugin.Battles.Count - 1] = $"Current: {_plugin.Battles[^1].Zone}";
-                    }
-                    catch (Exception e)
-                    {
-                        DalamudApi.Log.Error(e.ToString());
-                    }
-
-                    ImGui.SetNextItemWidth(250);
-                    ImGui.Combo("##battles", ref choosed, items, _plugin.Battles.Count);
-                    if (DalamudApi.ObjectTable.LocalPlayer != null &&
-                        DalamudApi.Conditions[ConditionFlag.InCombat] &&
-                        _plugin.Battles[^1].StartTime != 0)
-                        _plugin.Battles[^1].EndTime = DateTimeOffset.Now.ToUnixTimeSeconds();
-
-                    ImGui.Text(seconds is > 3600 or <= 1 ? $"00:00" : $"{seconds / 60:00}:{seconds % 60:00}");
-                    ImGui.SameLine(ImGui.GetWindowSize().X - 44);
-                    if (ImGui.Button(config.HideName ? "" : "")) config.HideName = !config.HideName;
-                    if (ImGui.IsItemHovered()) ImGui.SetTooltip(config.HideName ? "看" : "藏");
-                    ImGui.EndMenuBar();
+                    restoringThisFrame = true;
+                    pendingRestore = false;
+                    ImGui.SetWindowSize(pendingRestoreSize, ImGuiCond.Always);
+                    config.WindowSize = pendingRestoreSize;
                 }
 
-                //if (!config.SaveData) 
-                    DrawData(battle);
-                //else DrawDataWithCalc(battle);
+                var currentSize = ImGui.GetWindowSize();
+                if (!restoringThisFrame && currentSize.X > 200 && currentSize.Y > 120)
+                    config.WindowSize = currentSize;
+                {
+                    var battle = _plugin.Battles[choosed];
+                    var seconds = battle.Duration();
+                    if (ImGui.BeginMenuBar())
+                    {
+                        var menuCompact = ImGui.GetWindowSize().X < 560;
+
+                        if (ImGui.ArrowButton("最小化", ImGuiDir.Left))
+                        {
+                            config.Mini = true;
+                            config.WindowSize = ImGui.GetWindowSize();
+                            config.Save();
+                            ImGui.EndMenuBar();
+                            return;
+                        }
+
+                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("最小化窗口");
+                        ImGui.SameLine();
+                        if (menuCompact)
+                        {
+                            if (ImGui.Button("菜单"))
+                                ImGui.OpenPopup("##mainMenu");
+
+                            var popPopup = PushReadablePopupStyle();
+                            if (ImGui.BeginPopup("##mainMenu"))
+                            {
+                                var changed = false;
+
+                                ImGui.TextDisabled("战斗");
+                                var items = new string[_plugin.Battles.Count];
+                                for (var i = 0; i < _plugin.Battles.Count; i++)
+                                {
+                                    var b = _plugin.Battles[i];
+                                    if (b.StartTime == 0)
+                                    {
+                                        items[i] = "(空)";
+                                        continue;
+                                    }
+
+                                    var start = DateTimeOffset.FromUnixTimeSeconds(b.StartTime).ToLocalTime();
+                                    var end = DateTimeOffset.FromUnixTimeSeconds(b.EndTime).ToLocalTime();
+                                    items[i] = $"{start:t}-{end:t} {b.Zone}";
+                                }
+
+                                if (_plugin.Battles[^1].StartTime != 0)
+                                    items[^1] = $"当前: {_plugin.Battles[^1].Zone}";
+
+                                ImGui.SetNextItemWidth(260);
+                                ImGui.Combo("##battles", ref choosed, items, _plugin.Battles.Count);
+                                ImGui.SameLine();
+                                ImGui.Text(seconds is > 3600 or <= 1 ? $"00:00" : $"{seconds / 60:00}:{seconds % 60:00}");
+
+                                ImGui.Separator();
+                                ImGui.TextDisabled("筛选/排序");
+                                ImGui.SetNextItemWidth(260);
+                                ImGui.InputTextWithHint("##filter", "筛选：姓名/职业", ref filter, 64);
+                                ImGui.SetNextItemWidth(260);
+                                var sortMode = config.SortMode;
+                                if (ImGui.Combo("##sortMode", ref sortMode, SortModes, SortModes.Length))
+                                {
+                                    config.SortMode = sortMode;
+                                    changed = true;
+                                }
+
+                                ImGui.Separator();
+                                ImGui.TextDisabled("视图");
+                                changed |= ImGui.SliderInt("仅显示前 N 名（0=全部）", ref config.TopN, 0, 24);
+                                changed |= ImGui.Checkbox("显示直击/暴击/直爆列", ref config.ShowRates);
+                                changed |= ImGui.Checkbox("高亮自己", ref config.HighlightSelf);
+                                changed |= ImGui.Checkbox("自动紧凑布局（窄窗口隐藏部分列）", ref config.AutoCompact);
+                                if (!config.AutoCompact)
+                                    changed |= ImGui.Checkbox("手动紧凑模式", ref config.CompactMode);
+                                else
+                                    ImGui.TextDisabled("自动紧凑布局开启时，忽略“手动紧凑模式”。");
+
+                                ImGui.Separator();
+                                ImGui.TextDisabled("窗口");
+                                changed |= ImGui.Checkbox("鼠标穿透（按住 Alt 临时操作）", ref config.ClickThrough);
+                                changed |= ImGui.SliderInt("背景透明度（不影响文字）", ref config.BGColor, 0, 100);
+
+                                ImGui.Separator();
+                                if (ImGui.Button("清空筛选"))
+                                    filter = string.Empty;
+                                ImGui.SameLine();
+                                if (ImGui.Button("重置列宽"))
+                                {
+                                    config.TableLayoutSeed++;
+                                    changed = true;
+                                }
+
+                                ImGui.Separator();
+                                if (ImGui.MenuItem(config.HideName ? "姓名：隐藏" : "姓名：显示"))
+                                {
+                                    config.HideName = !config.HideName;
+                                    changed = true;
+                                }
+                                if (ImGui.MenuItem("打开设置"))
+                                    instance?.configWindow.IsOpen = true;
+                                if (ImGui.MenuItem("打开调试"))
+                                    instance?.debugWindow.IsOpen = true;
+
+                                if (changed) config.Save();
+                                ImGui.EndPopup();
+                            }
+                            ImGui.PopStyleColor(popPopup);
+                        }
+                        else
+                        {
+                            var items = new string[_plugin.Battles.Count];
+                            for (var i = 0; i < _plugin.Battles.Count; i++)
+                            {
+                                var b = _plugin.Battles[i];
+                                if (b.StartTime == 0)
+                                {
+                                    items[i] = "(空)";
+                                    continue;
+                                }
+
+                                var start = DateTimeOffset.FromUnixTimeSeconds(b.StartTime).ToLocalTime();
+                                var end = DateTimeOffset.FromUnixTimeSeconds(b.EndTime).ToLocalTime();
+                                items[i] = $"{start:t}-{end:t} {b.Zone}";
+                            }
+
+                            if (_plugin.Battles[^1].StartTime != 0)
+                                items[^1] = $"当前: {_plugin.Battles[^1].Zone}";
+
+                            ImGui.SetNextItemWidth(250);
+                            ImGui.Combo("##battles", ref choosed, items, _plugin.Battles.Count);
+
+                            ImGui.Text(seconds is > 3600 or <= 1 ? $"00:00" : $"{seconds / 60:00}:{seconds % 60:00}");
+
+                            ImGui.SameLine();
+                            ImGui.SetNextItemWidth(160);
+                            ImGui.InputTextWithHint("##filter", "筛选：姓名/职业", ref filter, 64);
+
+                            ImGui.SameLine();
+                            ImGui.SetNextItemWidth(90);
+                            var sortMode = config.SortMode;
+                            if (ImGui.Combo("##sortMode", ref sortMode, SortModes, SortModes.Length))
+                            {
+                                config.SortMode = sortMode;
+                                config.Save();
+                            }
+
+                            ImGui.SameLine();
+                            if (ImGui.Button("视图"))
+                                ImGui.OpenPopup("##view");
+                            var popPopup = PushReadablePopupStyle();
+                            if (ImGui.BeginPopup("##view"))
+                            {
+                                var changed = false;
+                                changed |= ImGui.SliderInt("仅显示前 N 名（0=全部）", ref config.TopN, 0, 24);
+                                changed |= ImGui.Checkbox("显示直击/暴击/直爆列", ref config.ShowRates);
+                                changed |= ImGui.Checkbox("高亮自己", ref config.HighlightSelf);
+                                changed |= ImGui.Checkbox("自动紧凑布局（窄窗口隐藏部分列）", ref config.AutoCompact);
+                                if (!config.AutoCompact)
+                                    changed |= ImGui.Checkbox("手动紧凑模式", ref config.CompactMode);
+                                else
+                                    ImGui.TextDisabled("自动紧凑布局开启时，忽略“手动紧凑模式”。");
+
+                                ImGui.Separator();
+                                if (ImGui.Button("清空筛选"))
+                                    filter = string.Empty;
+                                ImGui.SameLine();
+                                if (ImGui.Button("重置列宽"))
+                                {
+                                    config.TableLayoutSeed++;
+                                    changed = true;
+                                }
+
+                                if (changed) config.Save();
+                                ImGui.EndPopup();
+                            }
+                            ImGui.PopStyleColor(popPopup);
+
+                            var style = ImGui.GetStyle();
+                            var pad = style.FramePadding.X * 2f;
+                            var spacing = style.ItemSpacing.X;
+                            var nameLabel = config.HideName ? "姓名(隐)" : "姓名(显)";
+                            var groupWidth =
+                                (ImGui.CalcTextSize("窗口").X + pad) + spacing +
+                                (ImGui.CalcTextSize(nameLabel).X + pad) + spacing +
+                                (ImGui.CalcTextSize("设置").X + pad) + spacing +
+                                (ImGui.CalcTextSize("调试").X + pad);
+                            var targetX = ImGui.GetWindowSize().X - groupWidth - style.WindowPadding.X;
+                            if (targetX > ImGui.GetCursorPosX())
+                                ImGui.SameLine(targetX);
+
+                            if (ImGui.Button("窗口"))
+                                ImGui.OpenPopup("##windowOptions");
+                            popPopup = PushReadablePopupStyle();
+                            if (ImGui.BeginPopup("##windowOptions"))
+                            {
+                                var changed = false;
+                                changed |= ImGui.Checkbox("鼠标穿透（按住 Alt 临时操作）", ref config.ClickThrough);
+                                changed |= ImGui.SliderInt("背景透明度（不影响文字）", ref config.BGColor, 0, 100);
+                                if (changed) config.Save();
+                                ImGui.Separator();
+                                ImGui.TextDisabled("提示：开启鼠标穿透后窗口将不响应点击，按住 Alt 可临时操作。");
+                                ImGui.EndPopup();
+                            }
+                            ImGui.PopStyleColor(popPopup);
+
+                            ImGui.SameLine();
+                            if (ImGui.Button(nameLabel))
+                            {
+                                config.HideName = !config.HideName;
+                                config.Save();
+                            }
+                            if (ImGui.IsItemHovered()) ImGui.SetTooltip(config.HideName ? "当前隐藏姓名" : "当前显示姓名");
+                            ImGui.SameLine();
+                            if (ImGui.Button("设置")) instance?.configWindow.IsOpen = true;
+                            ImGui.SameLine();
+                            if (ImGui.Button("调试")) instance?.debugWindow.IsOpen = true;
+                        }
+                        ImGui.EndMenuBar();
+                    }
+
+                    //if (!config.SaveData) 
+                        DrawData(battle);
+                    //else DrawDataWithCalc(battle);
+                }
+            }
+            finally
+            {
+                ImGui.PopStyleColor(popStyle);
+            }
             }
         }
 
@@ -308,149 +806,253 @@ internal class PluginUI : IDisposable
 
         private void DrawData(ACTBattle battle)
         {
-            long total = 0;
-            Dictionary<uint, long> dmgList = new();
             var seconds = battle.Duration();
-
-            foreach (var (actor, damage) in battle.DataDic)
+            var canSimDots = battle.Level is >= 64 && !float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0;
+            Dictionary<uint, float>? dotByActor = null;
+            if (canSimDots)
             {
-                dmgList.Add(actor, damage.Damages[0].Damage);
-                if (float.IsInfinity(battle.TotalDotSim) || battle.TotalDotSim == 0 || battle.Level < 64) continue;
-                var dotDamage = (from entry in battle.DotDmgList where (entry.Key & 0xFFFFFFFF) == actor select entry.Value).Sum();
-                dmgList[actor] += (long)dotDamage;
+                dotByActor = new Dictionary<uint, float>();
+                foreach (var (active, dotDmg) in battle.DotDmgList)
+                {
+                    var source = (uint)(active & 0xFFFFFFFF);
+                    dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                }
             }
 
-            dmgList = (from entry in dmgList orderby entry.Value descending select entry).ToDictionary(x => x.Key, x => x.Value);
+            var localPlayerId = DalamudApi.ClientState.LocalPlayer?.EntityId ?? 0;
+            var filterText = filter.Trim();
+            var rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(battle.DataDic.Count);
+            long actorDamageTotal = 0;
+            foreach (var (actor, damage) in battle.DataDic)
+            {
+                var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
+                if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
+                    totalDamage += (long)dotDamage;
 
-            ImGui.BeginTable("ACTMainWindow", 7, ImGuiTableFlags.Hideable | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollY);
+                actorDamageTotal += totalDamage;
+
+                var swings = damage.Damages.TryGetValue(0, out var baseDamage) ? baseDamage.swings : 0;
+                var dRate = swings == 0 ? -1f : (float)baseDamage.D / swings;
+                var cRate = swings == 0 ? -1f : (float)baseDamage.C / swings;
+                var dcRate = swings == 0 ? -1f : (float)baseDamage.DC / swings;
+                rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
+            }
+
+            if (!string.IsNullOrWhiteSpace(filterText))
+            {
+                rows = rows.Where(r =>
+                {
+                    var name = battle.Name.GetValueOrDefault(r.Actor, JobNameCn(r.JobId));
+                    if (name.Contains(filterText, StringComparison.OrdinalIgnoreCase)) return true;
+                    if (JobNameCn(r.JobId).Contains(filterText, StringComparison.OrdinalIgnoreCase)) return true;
+                    if (((Job)r.JobId).ToString().Contains(filterText, StringComparison.OrdinalIgnoreCase)) return true;
+                    return r.Actor.ToString("X").Contains(filterText, StringComparison.OrdinalIgnoreCase);
+                }).ToList();
+            }
+
+            rows.Sort((a, b) =>
+            {
+                return config.SortMode switch
+                {
+                    2 => StringComparer.CurrentCulture.Compare(
+                        battle.Name.GetValueOrDefault(a.Actor, JobNameCn(a.JobId)),
+                        battle.Name.GetValueOrDefault(b.Actor, JobNameCn(b.JobId))),
+                    1 => b.Damage.CompareTo(a.Damage),
+                    _ => ((float)b.Damage / seconds).CompareTo((float)a.Damage / seconds),
+                };
+            });
+
+            if (config.TopN > 0 && rows.Count > config.TopN)
+                rows = rows.Take(config.TopN).ToList();
+
+            var compact = config.AutoCompact
+                ? ImGui.GetContentRegionAvail().X < 520
+                : config.CompactMode;
+            var showRates = config.ShowRates && !compact;
+
+            var maxDps = rows.Count == 0 ? 0 : rows.Max(r => (float)r.Damage / seconds);
+
+            var limitDamage = battle.LimitBreak.Count > 0 ? battle.LimitBreak.Values.Sum() : 0L;
+            var totalDamageAll = actorDamageTotal;
+            if (battle.TotalDotDamage != 0 && !canSimDots)
+                totalDamageAll += battle.TotalDotDamage;
+            if (limitDamage > 0)
+                totalDamageAll += limitDamage;
+
+            var totalDps = (float)totalDamageAll / seconds;
+            ImGui.Text($"总秒伤：{totalDps:F1}    总伤害：{totalDamageAll:N0}    参与：{battle.DataDic.Count}");
+            if (!string.IsNullOrWhiteSpace(filterText) || config.TopN > 0)
+            {
+                var showFilter = string.IsNullOrWhiteSpace(filterText) ? "（无）" : filterText;
+                var showTopN = config.TopN > 0 ? $"前{config.TopN}" : "全部";
+                ImGui.TextDisabled($"当前视图：{showTopN}，筛选：{showFilter}");
+            }
+
+            ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(6f, 4f));
+            var columnCount = showRates ? 7 : 4;
+            ImGui.BeginTable($"ACTMainWindow##{config.TableLayoutSeed}", columnCount,
+                ImGuiTableFlags.Hideable | ImGuiTableFlags.Resizable |
+                ImGuiTableFlags.ScrollY | ImGuiTableFlags.ScrollX |
+                ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders |
+                ImGuiTableFlags.SizingStretchProp);
             {
                 ImGui.TableSetupScrollFreeze(0, 1);
                 ImGui.TableSetupColumn("###Icon",
                     ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide |
                     ImGuiTableColumnFlags.NoDirectResize,
                     ImGui.GetTextLineHeight());
-                var headers = new string[]
-                    {"角色名", "菜", "直击", "暴击", "直爆"};
-                foreach (var t in headers) ImGui.TableSetupColumn(t);
+                ImGui.TableSetupColumn("姓名", ImGuiTableColumnFlags.WidthStretch | ImGuiTableColumnFlags.NoHide, 1f);
+                ImGui.TableSetupColumn("死亡", ImGuiTableColumnFlags.WidthFixed, 45f);
+                if (showRates)
+                {
+                    ImGui.TableSetupColumn("直击", ImGuiTableColumnFlags.WidthFixed, 55f);
+                    ImGui.TableSetupColumn("暴击", ImGuiTableColumnFlags.WidthFixed, 55f);
+                    ImGui.TableSetupColumn("直爆", ImGuiTableColumnFlags.WidthFixed, 55f);
+                }
 
-                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (45f - ImGui.CalcTextSize("伤害").X) / 2);
-                ImGui.TableSetupColumn("伤害", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide, 45f);
+                ImGui.TableSetupColumn("秒伤", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide, 110f);
                 ImGui.TableHeadersRow();
 
-
-                foreach (var (actor, value) in dmgList)
+                var rank = 0;
+                foreach (var r in rows)
                 {
+                    rank++;
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
-                    if (_plugin.Icon.TryGetValue(battle.DataDic[actor].JobId, out var icon))
-                        ImGui.Image(icon!.Handle,
+                    if (_plugin.Icon.TryGetValue(r.JobId, out var icon) && icon != null)
+                        ImGui.Image(icon.Handle,
                             new Vector2(ImGui.GetTextLineHeight(), ImGui.GetTextLineHeight()));
 
                     ImGui.TableNextColumn();
-                    ImGui.Text(config.HideName
-                        ? ((Job)battle.DataDic[actor].JobId).ToString()
-                        : battle.Name[actor]);
+                    var displayName = config.HideName
+                        ? JobNameCn(r.JobId)
+                        : battle.Name.GetValueOrDefault(r.Actor, JobNameCn(r.JobId));
+
+                    if (config.HighlightSelf && r.Actor == localPlayerId)
+                    {
+                        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.85f, 0.2f, 1f));
+                        ImGui.Text($"{rank}. {displayName}");
+                        ImGui.PopStyleColor();
+                    }
+                    else
+                    {
+                        ImGui.Text($"{rank}. {displayName}");
+                    }
+
                     ImGui.TableNextColumn();
-                    ImGui.Text(battle.DataDic[actor].Death.ToString("D"));
+                    ImGui.Text(r.Death.ToString("D"));
+
+                    if (showRates)
+                    {
+                        ImGui.TableNextColumn();
+                        ImGui.Text(r.D < 0 ? "-" : r.D.ToString("P1"));
+                        ImGui.TableNextColumn();
+                        ImGui.Text(r.C < 0 ? "-" : r.C.ToString("P1"));
+                        ImGui.TableNextColumn();
+                        ImGui.Text(r.DC < 0 ? "-" : r.DC.ToString("P1"));
+                    }
+
                     ImGui.TableNextColumn();
-                    ImGui.Text(((float)battle.DataDic[actor].Damages[0].D /
-                                battle.DataDic[actor].Damages[0].swings).ToString("P1") + "%");
-                    ImGui.TableNextColumn();
-                    ImGui.Text(((float)battle.DataDic[actor].Damages[0].C /
-                                battle.DataDic[actor].Damages[0].swings).ToString("P1") + "%");
-                    ImGui.TableNextColumn();
-                    ImGui.Text(((float)battle.DataDic[actor].Damages[0].DC /
-                                battle.DataDic[actor].Damages[0].swings).ToString("P1") + "%");
-                    ImGui.TableNextColumn();
-                    ImGui.SetCursorPosX(ImGui.GetCursorPosX() + ImGui.GetColumnWidth() -
-                                        ImGui.CalcTextSize($"{(float)value / seconds,8:F1}").X);
-                    ImGui.Text($"{(float)value / seconds,8:F1}");
-                    if (ImGui.IsItemHovered()) DrawDetails(actor);
-                    total += value;
+                    var dps = (float)r.Damage / seconds;
+                    var frac = maxDps <= 0 ? 0 : dps / maxDps;
+                    if (frac < 0) frac = 0;
+                    if (frac > 1) frac = 1;
+
+                    ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
+                    var barColor = (config.HighlightSelf && r.Actor == localPlayerId)
+                        ? new Vector4(0.3f, 0.9f, 0.3f, 0.9f)
+                        : new Vector4(0.25f, 0.65f, 1f, 0.9f);
+                    ImGui.PushStyleColor(ImGuiCol.PlotHistogram, barColor);
+                    ImGui.ProgressBar(frac, new Vector2(-1, ImGui.GetTextLineHeight()), $"{dps:F1}");
+                    ImGui.PopStyleColor();
+                    ImGui.PopStyleVar();
+                    if (ImGui.IsItemHovered()) DrawDetails(r.Actor);
                 }
-                if (battle.TotalDotDamage != 0 && float.IsInfinity(battle.TotalDotSim) ||
-                    battle.Level < 64) //Dot damage
+                if (battle.TotalDotDamage != 0 && !canSimDots) //Dot damage
                 {
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
-                    ImGui.Text("DOT");
+                    ImGui.Text("持续伤害");
                     ImGui.TableNextColumn();
+                    if (showRates)
+                    {
+                        ImGui.TableNextColumn();
+                        ImGui.TableNextColumn();
+                        ImGui.TableNextColumn();
+                    }
                     ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.SetCursorPosX(ImGui.GetCursorPosX() + ImGui.GetColumnWidth() -
-                    ImGui.CalcTextSize(
-                    $"{(float)battle.TotalDotDamage / battle.Duration(),8:F1}")
-                                            .X);
-                    ImGui.Text(
-                    $"{(float)battle.TotalDotDamage / battle.Duration(),8:F1}");
-                    total += battle.TotalDotDamage;
+                    ImGui.Text($"{(float)battle.TotalDotDamage / battle.Duration():F1}");
                 }
 
-                if (battle.LimitBreak.Count > 0)
+                if (limitDamage > 0)
                 {
-                    long limitDamage = 0;
-                    foreach (var (skill, damage) in battle.LimitBreak)
-                    {
-                        limitDamage += damage;
-                    }
                     ImGui.TableNextRow(); //LimitBreak
                     ImGui.TableNextColumn();
-                    if (_plugin.Icon.TryGetValue(99, out var icon))
-                        ImGui.Image(icon!.Handle,
+                    if (_plugin.Icon.TryGetValue(99, out var icon) && icon != null)
+                        ImGui.Image(icon.Handle,
                             new Vector2(ImGui.GetTextLineHeight(), ImGui.GetTextLineHeight()));
                     ImGui.TableNextColumn();
                     ImGui.Text("极限技");
                     ImGui.TableNextColumn();
+                    if (showRates)
+                    {
+                        ImGui.TableNextColumn();
+                        ImGui.TableNextColumn();
+                        ImGui.TableNextColumn();
+                    }
                     ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.SetCursorPosX(ImGui.GetCursorPosX() + ImGui.GetColumnWidth() -
-                                        ImGui.CalcTextSize($"{(float)limitDamage / seconds,8:F1}").X);
-                    ImGui.Text($"{(float)limitDamage / seconds,8:F1}");
+                    ImGui.Text($"{(float)limitDamage / seconds:F1}");
                     if (ImGui.IsItemHovered()) DrawLimitBreak();
-                    total += limitDamage;
                 }
 
                 ImGui.TableNextRow(); //Total Damage
                 ImGui.TableNextColumn();
                 ImGui.TableNextColumn();
-                ImGui.Text("Total");
+                ImGui.Text("全场总计");
                 ImGui.TableNextColumn();
+                if (showRates)
+                {
+                    ImGui.TableNextColumn();
+                    ImGui.TableNextColumn();
+                    ImGui.TableNextColumn();
+                }
                 ImGui.TableNextColumn();
-                ImGui.TableNextColumn();
-                ImGui.TableNextColumn();
-                ImGui.TableNextColumn();
-                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + ImGui.GetColumnWidth() -
-                                    ImGui.CalcTextSize($"{(float)total / seconds,8:F1}").X);
-                ImGui.Text($"{(float)total / seconds,8:F1}");
+                ImGui.Text($"{(float)totalDamageAll / seconds:F1}");
 
-                if (!float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0 && config.delta) //Dot Simulation
+                if (canSimDots && battle.TotalDotDamage != 0 && config.delta) //Dot Simulation
                 {
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
-                    ImGui.Text("Δ");
+                    ImGui.Text("DoT 模拟偏差");
                     ImGui.TableNextColumn();
+                    if (showRates)
+                    {
+                        ImGui.TableNextColumn();
+                        ImGui.TableNextColumn();
+                        ImGui.TableNextColumn();
+                    }
                     ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.Text($"{battle.TotalDotSim * 100 / battle.TotalDotDamage - 100:F2}%%");
+                    ImGui.Text($"{battle.TotalDotSim * 100 / battle.TotalDotDamage - 100:F2}%");
                 }
             }
             ImGui.EndTable();
+            ImGui.PopStyleVar();
         }
 
         private void DrawDataWithCalc(ACTBattle battle)
         {
+            if (!config.SaveData)
+            {
+                DrawData(battle);
+                return;
+            }
+
             long total = 0;
             Dictionary<uint, long> dmgList = new();
             var seconds = battle.Duration();
-            var index = Math.Min(savedBattle.Count, config.CalcTime + 1) - 1;
+            var index = Math.Max(1, Math.Min(savedBattle.Count, config.CalcTime + 1) - 1);
 
             foreach (var (actor, damage) in battle.DataDic)
             {
@@ -462,20 +1064,26 @@ internal class PluginUI : IDisposable
 
             dmgList = (from entry in dmgList orderby entry.Value descending select entry).ToDictionary(x => x.Key, x => x.Value);
 
-            if (config.SaveData) CheckSave(dmgList);
+            CheckSave(dmgList);
+            if (savedBattle.Count < 2) return;
 
-            ImGui.BeginTable("ACTMainWindow", 8, ImGuiTableFlags.Hideable | ImGuiTableFlags.Resizable);
+            ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(6f, 4f));
+            ImGui.BeginTable($"ACTMainWindow##{config.TableLayoutSeed}", 8,
+                ImGuiTableFlags.Hideable | ImGuiTableFlags.Resizable |
+                ImGuiTableFlags.ScrollY | ImGuiTableFlags.ScrollX |
+                ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders |
+                ImGuiTableFlags.SizingStretchProp);
             {
                 ImGui.TableSetupColumn("###Icon",
                     ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide |
                     ImGuiTableColumnFlags.NoDirectResize,
                     ImGui.GetTextLineHeight());
                 var headers = new string[]
-                    {"角色名", "菜", "直击", "暴击", "直爆"};
+                    {"姓名", "死亡", "直击", "暴击", "直爆"};
                 foreach (var t in headers) ImGui.TableSetupColumn(t);
 
                 ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (45f - ImGui.CalcTextSize("伤害").X) / 2);
-                ImGui.TableSetupColumn("伤害", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide, 45f);
+                ImGui.TableSetupColumn("秒伤", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide, 90f);
                 ImGui.TableSetupColumn("计算伤害", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide, 80f);
                 ImGui.TableHeadersRow();
                 
@@ -483,25 +1091,28 @@ internal class PluginUI : IDisposable
                 {
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
-                    if (_plugin.Icon.TryGetValue(battle.DataDic[actor].JobId, out var icon))
-                        ImGui.Image(icon!.Handle,
+                    if (_plugin.Icon.TryGetValue(battle.DataDic[actor].JobId, out var icon) && icon != null)
+                        ImGui.Image(icon.Handle,
                             new Vector2(ImGui.GetTextLineHeight(), ImGui.GetTextLineHeight()));
 
                     ImGui.TableNextColumn();
                     ImGui.Text(config.HideName
-                        ? ((Job)battle.DataDic[actor].JobId).ToString()
-                        : battle.Name[actor]);
+                        ? JobNameCn(battle.DataDic[actor].JobId)
+                        : battle.Name.GetValueOrDefault(actor, JobNameCn(battle.DataDic[actor].JobId)));
                     ImGui.TableNextColumn();
                     ImGui.Text(battle.DataDic[actor].Death.ToString("D"));
                     ImGui.TableNextColumn();
-                    ImGui.Text(((float)battle.DataDic[actor].Damages[0].D /
-                                battle.DataDic[actor].Damages[0].swings).ToString("P1") + "%");
+                    ImGui.Text(battle.DataDic[actor].Damages[0].swings == 0
+                        ? "-"
+                        : ((float)battle.DataDic[actor].Damages[0].D / battle.DataDic[actor].Damages[0].swings).ToString("P1"));
                     ImGui.TableNextColumn();
-                    ImGui.Text(((float)battle.DataDic[actor].Damages[0].C /
-                                battle.DataDic[actor].Damages[0].swings).ToString("P1") + "%");
+                    ImGui.Text(battle.DataDic[actor].Damages[0].swings == 0
+                        ? "-"
+                        : ((float)battle.DataDic[actor].Damages[0].C / battle.DataDic[actor].Damages[0].swings).ToString("P1"));
                     ImGui.TableNextColumn();
-                    ImGui.Text(((float)battle.DataDic[actor].Damages[0].DC /
-                                battle.DataDic[actor].Damages[0].swings).ToString("P1") + "%");
+                    ImGui.Text(battle.DataDic[actor].Damages[0].swings == 0
+                        ? "-"
+                        : ((float)battle.DataDic[actor].Damages[0].DC / battle.DataDic[actor].Damages[0].swings).ToString("P1"));
                     ImGui.TableNextColumn();
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + ImGui.GetColumnWidth() -
                                         ImGui.CalcTextSize($"{(float)value / seconds,8:F1}").X);
@@ -519,13 +1130,12 @@ internal class PluginUI : IDisposable
 
                     total += value;
                 }
-                if (battle.TotalDotDamage != 0 && float.IsInfinity(battle.TotalDotSim) ||
-                    battle.Level < 64) //Dot damage
+                if (battle.TotalDotDamage != 0 && (float.IsInfinity(battle.TotalDotSim) || battle.TotalDotSim == 0 || battle.Level < 64)) //Dot damage
                 {
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
-                    ImGui.Text("DOT");
+                    ImGui.Text("持续伤害");
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
@@ -571,7 +1181,7 @@ internal class PluginUI : IDisposable
                 ImGui.TableNextRow(); //Total Damage
                 ImGui.TableNextColumn();
                 ImGui.TableNextColumn();
-                ImGui.Text("Total");
+                ImGui.Text("总计");
                 ImGui.TableNextColumn();
                 ImGui.TableNextColumn();
                 ImGui.TableNextColumn();
@@ -582,7 +1192,7 @@ internal class PluginUI : IDisposable
                 ImGui.Text($"{(float)total / seconds,8:F1}");
                 ImGui.TableNextColumn();
 
-                if (!float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0 && config.delta) //Dot Simulation
+                if (!float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0 && config.delta && battle.TotalDotDamage != 0) //Dot Simulation
                 {
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
@@ -593,18 +1203,24 @@ internal class PluginUI : IDisposable
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
-                    ImGui.Text($"{battle.TotalDotSim * 100 / battle.TotalDotDamage - 100:F2}%%");
+                    ImGui.Text($"{battle.TotalDotSim * 100 / battle.TotalDotDamage - 100:F2}%");
                     ImGui.TableNextColumn();
                 }
             }
             ImGui.EndTable();
+            ImGui.PopStyleVar();
         }
 
 
         private void DrawDetails(uint actor)
         {
-            ImGui.BeginTooltip();
-            ImGui.BeginTable("Tooltip", 6, ImGuiTableFlags.Borders);
+            lock (_plugin.SyncRoot)
+            {
+                if (_plugin.Battles.Count < 1) return;
+                choosed = Math.Clamp(choosed, 0, _plugin.Battles.Count - 1);
+
+                ImGui.BeginTooltip();
+            ImGui.BeginTable("详情", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg);
 
             ImGui.TableSetupColumn("###Icon");
             ImGui.TableSetupColumn("###SkillName");
@@ -612,7 +1228,7 @@ internal class PluginUI : IDisposable
             ImGui.TableSetupColumn("暴击");
             ImGui.TableSetupColumn("直爆");
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (45f - ImGui.CalcTextSize("伤害").X) / 2);
-            ImGui.TableSetupColumn("DPS", ImGuiTableColumnFlags.WidthFixed, 45f);
+            ImGui.TableSetupColumn("秒伤", ImGuiTableColumnFlags.WidthFixed, 60f);
             ImGui.TableHeadersRow();
 
             var battle = _plugin.Battles[choosed];
@@ -621,20 +1237,21 @@ internal class PluginUI : IDisposable
             damage.Sort((pair1, pair2) => pair2.Value.Damage.CompareTo(pair1.Value.Damage));
             foreach (var (action, dmg) in damage)
             {
-                if (action == 0 || !sheet.TryGetRow(action,out _)) continue;
+                if (action == 0 || !sheet.TryGetRow(action, out var actionRow)) continue;
                 ImGui.TableNextRow();
                 ImGui.TableNextColumn();
-                if (Icon.TryGetValue(action, out var icon))
-                    ImGui.Image(icon!.Handle,
+                EnsureActionIcon(action);
+                if (Icon.TryGetValue(action, out var icon) && icon != null)
+                    ImGui.Image(icon.Handle,
                         new Vector2(ImGui.GetTextLineHeight(), ImGui.GetTextLineHeight()));
                 ImGui.TableNextColumn();
-                ImGui.Text(sheet.GetRow(action).Name.ExtractText());
+                ImGui.Text(actionRow.Name.ExtractText());
                 ImGui.TableNextColumn();
-                ImGui.Text(((float)dmg.D / dmg.swings).ToString("P1") + "%");
+                ImGui.Text(dmg.swings == 0 ? "-" : ((float)dmg.D / dmg.swings).ToString("P1"));
                 ImGui.TableNextColumn();
-                ImGui.Text(((float)dmg.C / dmg.swings).ToString("P1") + "%");
+                ImGui.Text(dmg.swings == 0 ? "-" : ((float)dmg.C / dmg.swings).ToString("P1"));
                 ImGui.TableNextColumn();
-                ImGui.Text(((float)dmg.DC / dmg.swings).ToString("P1") + "%");
+                ImGui.Text(dmg.swings == 0 ? "-" : ((float)dmg.DC / dmg.swings).ToString("P1"));
                 ImGui.TableNextColumn();
                 var temp = (float)dmg.Damage / battle.Duration();
                 ImGui.SetCursorPosX(ImGui.GetCursorPosX() + ImGui.GetColumnWidth() -
@@ -651,16 +1268,15 @@ internal class PluginUI : IDisposable
                 {
                     var buff = (uint)(active >> 32);
                     var source = (uint)(active & 0xFFFFFFFF);
-                    if (!BuffIcon.ContainsKey(buff))
-                        BuffIcon.TryAdd(buff,
-                            DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(buffSheet.GetRow(buff)!.Icon)).RentAsync().Result);
+                    EnsureBuffIcon(buff);
 
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
-                    ImGui.Image(BuffIcon[buff]!.Handle,
-                        new Vector2(ImGui.GetTextLineHeight(), ImGui.GetTextLineHeight() * 1.2f));
+                    if (BuffIcon.TryGetValue(buff, out var buffIcon) && buffIcon != null)
+                        ImGui.Image(buffIcon.Handle,
+                            new Vector2(ImGui.GetTextLineHeight(), ImGui.GetTextLineHeight() * 1.2f));
                     ImGui.TableNextColumn();
-                    ImGui.Text(buffSheet.GetRow(buff).Name.ExtractText());
+                    ImGui.Text($"{(buffSheet.TryGetRow(buff, out var buffRow) ? buffRow.Name.ExtractText() : buff.ToString())}");
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
                     ImGui.TableNextColumn();
@@ -675,20 +1291,21 @@ internal class PluginUI : IDisposable
             ImGui.EndTable();
             if (battle.DataDic[actor].MaxDamageSkill != 0)
             {
-                ImGui.Text($"最大伤害 : {sheet.GetRow(battle.DataDic[actor].MaxDamageSkill).Name.ExtractText()} - {battle.DataDic[actor].MaxDamage:N0}");
+                ImGui.Text($"最大伤害：{sheet.GetRow(battle.DataDic[actor].MaxDamageSkill).Name.ExtractText()} - {battle.DataDic[actor].MaxDamage:N0}");
             }
             ImGui.EndTooltip();
+            }
         }
 
         private void DrawLimitBreak()
         {
             ImGui.BeginTooltip();
-            ImGui.BeginTable("LimitBreak", 3, ImGuiTableFlags.Borders);
+            ImGui.BeginTable("极限技", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg);
 
             ImGui.TableSetupColumn("###Icon");
             ImGui.TableSetupColumn("###SkillName");
             ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (45f - ImGui.CalcTextSize("伤害").X) / 2);
-            ImGui.TableSetupColumn("DPS", ImGuiTableColumnFlags.WidthFixed, 45f);
+            ImGui.TableSetupColumn("秒伤", ImGuiTableColumnFlags.WidthFixed, 60f);
             ImGui.TableHeadersRow();
 
             var damage = _plugin.Battles[choosed].LimitBreak.ToList();
@@ -713,24 +1330,40 @@ internal class PluginUI : IDisposable
             ImGui.EndTooltip();
         }
 
-        private void DrawMini()
+        private void DrawMini(bool forced)
         {
-            if (config.Mini)
-            {
-                Flags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar |
-                        (config.NoResize ? ImGuiWindowFlags.NoResize : ImGuiWindowFlags.None) |
-                        (config.Lock ? ImGuiWindowFlags.NoMove : ImGuiWindowFlags.None);
-                
-                if (ImGui.ImageButton(mainIcon.Handle, new Vector2(40f)))
-                {
-                    Flags ^= ImGuiWindowFlags.AlwaysAutoResize;
-                    config.Mini = !config.Mini;
-                    config.Save();
-                    ImGui.SetWindowSize(config.WindowSize);
-                }
+            if (!config.Mini && !forced) return;
 
-                if (ImGui.IsItemHovered()) ImGui.SetTooltip("还原");
+            var clickThroughActive = config.ClickThrough && !ImGui.GetIO().KeyAlt;
+            var flags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar |
+                        ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
+                        (config.NoResize ? ImGuiWindowFlags.NoResize : ImGuiWindowFlags.None) |
+                        (clickThroughActive ? ImGuiWindowFlags.NoInputs : ImGuiWindowFlags.None);
+            if (forced)
+                flags |= ImGuiWindowFlags.NoBackground;
+
+            Flags = flags;
+            BgAlpha = Math.Clamp(config.BGColor / 100f, 0f, 1f);
+
+            var popStyle = PushBackgroundAlpha(config.BGColor / 100f);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4f, 4f));
+            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(2f, 2f));
+            var clicked = ImGui.ImageButton(mainIcon.Handle, new Vector2(40f));
+            if (clicked && !forced)
+            {
+                config.Mini = false;
+                config.Save();
+                var restoreSize = config.WindowSize;
+                if (restoreSize.X < 200 || restoreSize.Y < 120)
+                    restoreSize = new Vector2(480, 320);
+                pendingRestore = true;
+                pendingRestoreSize = restoreSize;
             }
+
+            ImGui.PopStyleVar(2);
+            ImGui.PopStyleColor(popStyle);
+
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(forced ? "战斗外自动最小化（到设置里关闭）" : "还原");
         }
 
         public void Dispose()
