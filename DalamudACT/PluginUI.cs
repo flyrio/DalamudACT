@@ -41,6 +41,7 @@ internal class PluginUI : IDisposable
     public ConfigWindow configWindow;
     public DebugWindow debugWindow;
     public MainWindow mainWindow;
+    public CardsWindow cardsWindow;
     public WindowSystem WindowSystem = new("伤害统计");
 
     private static void EnsureActionIcon(uint actionId)
@@ -241,12 +242,15 @@ internal class PluginUI : IDisposable
         configWindow = new ConfigWindow(_plugin);
         debugWindow = new DebugWindow(_plugin);
         mainWindow = new MainWindow(_plugin);
+        cardsWindow = new CardsWindow(_plugin);
 
         WindowSystem.AddWindow(configWindow);
         WindowSystem.AddWindow(debugWindow);
         WindowSystem.AddWindow(mainWindow);
+        WindowSystem.AddWindow(cardsWindow);
 
         mainWindow.IsOpen = true;
+        cardsWindow.IsOpen = config.CardsEnabled;
 
     }
 
@@ -263,6 +267,7 @@ internal class PluginUI : IDisposable
         configWindow.Dispose();
         debugWindow.Dispose();
         mainWindow?.Dispose();
+        cardsWindow?.Dispose();
     }
     
     public class ConfigWindow : Window, IDisposable
@@ -302,6 +307,54 @@ internal class PluginUI : IDisposable
                     if (!config.AutoCompact)
                         changed |= ImGui.Checkbox("手动紧凑模式", ref config.CompactMode);
 
+                    var showList = !config.Mini;
+                    if (ImGui.Checkbox("显示纵向列表（关闭=最小化图标）", ref showList))
+                    {
+                        config.Mini = !showList;
+                        config.ShowVerticalList = showList;
+                        changed = true;
+                    }
+
+                    var cardsEnabled = config.CardsEnabled;
+                    if (ImGui.Checkbox("显示独立名片", ref cardsEnabled))
+                    {
+                        config.CardsEnabled = cardsEnabled;
+                        if (instance?.cardsWindow != null)
+                        {
+                            instance.cardsWindow.IsOpen = cardsEnabled;
+                            if (cardsEnabled) instance.cardsWindow.ResetPositioning();
+                        }
+                        changed = true;
+                    }
+                    else
+                    {
+                        if (instance?.cardsWindow != null) instance.cardsWindow.IsOpen = config.CardsEnabled;
+                    }
+
+                    if (config.CardsEnabled)
+                    {
+                        var layoutModes = new[] { "独立名片列", "独立名片行" };
+                        var layoutMode = config.DisplayLayout;
+                        if (ImGui.Combo("名片布局", ref layoutMode, layoutModes, layoutModes.Length))
+                        {
+                            config.DisplayLayout = layoutMode;
+                            changed = true;
+                        }
+
+                        if (config.DisplayLayout == 0)
+                        {
+                            changed |= ImGui.SliderFloat("名片宽度(列)", ref config.CardColumnWidth, 120f, 800f);
+                            changed |= ImGui.SliderFloat("名片高度(列)", ref config.CardColumnHeight, 24f, 200f);
+                            changed |= ImGui.SliderFloat("名片间距(列)", ref config.CardColumnSpacing, 0f, 40f);
+                        }
+                        else
+                        {
+                            changed |= ImGui.SliderFloat("名片宽度(行)", ref config.CardRowWidth, 120f, 800f);
+                            changed |= ImGui.SliderFloat("名片高度(行)", ref config.CardRowHeight, 24f, 200f);
+                            changed |= ImGui.SliderFloat("名片间距(行)", ref config.CardRowSpacing, 0f, 40f);
+                        }
+                    }
+
                     var sortModes = new[] { "按秒伤", "按总伤害", "按姓名" };
                     var sortMode = config.SortMode;
                     if (ImGui.Combo("排序方式", ref sortMode, sortModes, sortModes.Length))
@@ -319,8 +372,7 @@ internal class PluginUI : IDisposable
 
                 if (ImGui.CollapsingHeader("战斗", ImGuiTreeNodeFlags.DefaultOpen))
                 {
-                    changed |= ImGui.Checkbox("最小化模式", ref config.Mini);
-                    changed |= ImGui.Checkbox("战斗外自动最小化", ref config.autohide);
+                    // 纵向列表/最小化 已合并到“视图”里控制
                     changed |= ImGui.Checkbox("显示 DoT 模拟偏差", ref config.delta);
                 }
 
@@ -453,6 +505,248 @@ internal class PluginUI : IDisposable
         }
     }
 
+    public class CardsWindow : Window, IDisposable
+    {
+        private bool positionedFromConfig;
+        private bool draggingCards;
+        public CardsWindow(ACT plugin) : base("伤害统计 - 名片列", ImGuiWindowFlags.AlwaysAutoResize, false)
+        {
+        }
+
+        public void ResetPositioning()
+        {
+            positionedFromConfig = false;
+        }
+
+        public override void Draw()
+        {
+            if (DalamudApi.Conditions[ConditionFlag.PvPDisplayActive]) return;
+            if (!config.CardsEnabled)
+            {
+                IsOpen = false;
+                return;
+            }
+
+            var clickThroughActive = config.ClickThrough && !ImGui.GetIO().KeyAlt;
+            if (!positionedFromConfig && config.HasCardsWindowPos)
+            {
+                ImGui.SetWindowPos(config.CardsWindowPos, ImGuiCond.Always);
+                positionedFromConfig = true;
+            }
+            Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
+                    ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
+                    ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoBackground |
+                    (clickThroughActive ? (ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoMouseInputs) : ImGuiWindowFlags.None);
+            BgAlpha = 0f;
+
+            ACTBattle battle;
+            var seconds = 1f;
+            var canSimDots = false;
+            lock (_plugin.SyncRoot)
+            {
+                if (_plugin.Battles.Count < 1) return;
+
+                var inCombat = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
+                var idx = choosed;
+                if (inCombat && _plugin.Battles[^1].StartTime != 0) idx = _plugin.Battles.Count - 1;
+                idx = Math.Clamp(idx, 0, _plugin.Battles.Count - 1);
+                battle = _plugin.Battles[idx];
+                if (battle.StartTime == 0) return;
+
+                seconds = battle.Duration();
+                canSimDots = battle.Level is >= 64 && !float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0;
+            }
+
+            Dictionary<uint, float>? dotByActor = null;
+            if (canSimDots)
+            {
+                dotByActor = new Dictionary<uint, float>();
+                foreach (var (active, dotDmg) in battle.DotDmgList)
+                {
+                    var source = (uint)(active & 0xFFFFFFFF);
+                    dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                }
+            }
+
+            var localPlayerId = DalamudApi.ClientState.LocalPlayer?.EntityId ?? 0;
+            var rows = new List<(uint Actor, uint JobId, long Damage, uint Death)>(battle.DataDic.Count);
+            foreach (var (actor, damage) in battle.DataDic)
+            {
+                var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
+                if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
+                    totalDamage += (long)dotDamage;
+
+                rows.Add((actor, damage.JobId, totalDamage, damage.Death));
+            }
+
+            rows.Sort((a, b) =>
+            {
+                return config.SortMode switch
+                {
+                    2 => StringComparer.CurrentCulture.Compare(
+                        battle.Name.GetValueOrDefault(a.Actor, JobNameCn(a.JobId)),
+                        battle.Name.GetValueOrDefault(b.Actor, JobNameCn(b.JobId))),
+                    1 => b.Damage.CompareTo(a.Damage),
+                    _ => ((float)b.Damage / seconds).CompareTo((float)a.Damage / seconds),
+                };
+            });
+
+            var rankByActor = new Dictionary<uint, int>(rows.Count);
+            for (var i = 0; i < rows.Count; i++)
+                rankByActor[rows[i].Actor] = i + 1;
+
+            if (config.TopN > 0 && rows.Count > config.TopN)
+            {
+                var localPlayerRank = localPlayerId != 0 && rankByActor.TryGetValue(localPlayerId, out var lpr) ? lpr : 0;
+                if (localPlayerRank > config.TopN)
+                {
+                    var othersCount = Math.Max(0, config.TopN - 1);
+                    var selfRow = rows[localPlayerRank - 1];
+                    rows = rows.Take(othersCount).Append(selfRow).ToList();
+                }
+                else
+                {
+                    rows = rows.Take(config.TopN).ToList();
+                }
+            }
+
+            var maxDps = rows.Count == 0 ? 0 : rows.Max(r => (float)r.Damage / seconds);
+            var lineHeight = ImGui.GetTextLineHeight();
+
+            var cardWidth = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnWidth : config.CardRowWidth, 120f, 800f);
+            var cardHeight = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnHeight : config.CardRowHeight, lineHeight * 2.2f, 300f);
+            var spacing = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnSpacing : config.CardRowSpacing, 0f, 40f);
+
+            if (!clickThroughActive && ImGui.IsWindowHovered())
+            {
+                var wheel = ImGui.GetIO().MouseWheel;
+                if (Math.Abs(wheel) > 0.0001f)
+                {
+                    var changed = false;
+                    if (ImGui.GetIO().KeyCtrl && ImGui.GetIO().KeyShift)
+                    {
+                        if (config.DisplayLayout == 0) config.CardColumnSpacing = Math.Clamp(config.CardColumnSpacing + wheel, 0f, 40f);
+                        else config.CardRowSpacing = Math.Clamp(config.CardRowSpacing + wheel, 0f, 40f);
+                        changed = true;
+                    }
+                    else if (ImGui.GetIO().KeyCtrl)
+                    {
+                        var delta = wheel * 10f;
+                        if (config.DisplayLayout == 0) config.CardColumnWidth = Math.Clamp(config.CardColumnWidth + delta, 120f, 800f);
+                        else config.CardRowWidth = Math.Clamp(config.CardRowWidth + delta, 120f, 800f);
+                        changed = true;
+                    }
+                    else if (ImGui.GetIO().KeyShift)
+                    {
+                        var delta = wheel * 2f;
+                        if (config.DisplayLayout == 0) config.CardColumnHeight = Math.Clamp(config.CardColumnHeight + delta, 24f, 300f);
+                        else config.CardRowHeight = Math.Clamp(config.CardRowHeight + delta, 24f, 300f);
+                        changed = true;
+                    }
+
+                    if (changed) config.Save();
+                }
+            }
+
+            var dragStartRequested = false;
+
+            void DrawCard((uint Actor, uint JobId, long Damage, uint Death) r)
+            {
+                var rank = rankByActor.TryGetValue(r.Actor, out var realRank) ? realRank : 0;
+
+                ImGui.PushID((int)r.Actor);
+                ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+                ImGui.BeginChild("##card", new Vector2(cardWidth, cardHeight), false,
+                    ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
+                    (clickThroughActive ? (ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoMouseInputs) : ImGuiWindowFlags.None));
+                try
+                {
+                    var iconSize = lineHeight * 1.2f;
+                    if (_plugin.Icon.TryGetValue(r.JobId, out var icon) && icon != null)
+                        ImGui.Image(icon.Handle, new Vector2(iconSize, iconSize));
+                    else
+                        ImGui.Dummy(new Vector2(iconSize, iconSize));
+
+                    ImGui.SameLine();
+                    var displayName = config.HideName
+                        ? JobNameCn(r.JobId)
+                        : battle.Name.GetValueOrDefault(r.Actor, JobNameCn(r.JobId));
+                    ImGui.Text($"{rank}. {displayName}");
+
+                    var dps = seconds <= 0 ? 0 : (float)r.Damage / seconds;
+                    var frac = maxDps <= 0 ? 0 : dps / maxDps;
+                    if (frac < 0) frac = 0;
+                    if (frac > 1) frac = 1;
+
+                    var barY = Math.Max(iconSize, lineHeight) + 2f;
+                    ImGui.SetCursorPos(new Vector2(0, barY));
+                    ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
+                    var barColor = (config.HighlightSelf && r.Actor == localPlayerId)
+                        ? new Vector4(0.3f, 0.9f, 0.3f, 0.9f)
+                        : new Vector4(0.25f, 0.65f, 1f, 0.9f);
+                    ImGui.PushStyleColor(ImGuiCol.PlotHistogram, barColor);
+                    ImGui.ProgressBar(frac, new Vector2(cardWidth, lineHeight), $"{dps:F1}");
+                    ImGui.PopStyleColor();
+                    ImGui.PopStyleVar();
+                }
+                finally
+                {
+                    ImGui.EndChild();
+                    ImGui.PopStyleVar();
+                }
+
+                if (!clickThroughActive && ImGui.IsItemHovered())
+                    instance?.mainWindow?.DrawDetails(r.Actor);
+
+                if (!clickThroughActive && ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                    dragStartRequested = true;
+
+                ImGui.PopID();
+            }
+
+            for (var i = 0; i < rows.Count; i++)
+            {
+                DrawCard(rows[i]);
+
+                if (i == rows.Count - 1) continue;
+
+                if (config.DisplayLayout == 0)
+                {
+                    if (spacing > 0) ImGui.Dummy(new Vector2(1, spacing));
+                }
+                else
+                {
+                    ImGui.SameLine(0, spacing);
+                }
+            }
+
+            if (!clickThroughActive)
+            {
+                if (dragStartRequested)
+                    draggingCards = true;
+
+                if (draggingCards)
+                {
+                    if (ImGui.IsMouseDown(ImGuiMouseButton.Right))
+                    {
+                        ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
+                    }
+                    else
+                    {
+                        draggingCards = false;
+                        config.CardsWindowPos = ImGui.GetWindowPos();
+                        config.HasCardsWindowPos = true;
+                        config.Save();
+                    }
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
     public class MainWindow : Window, IDisposable
     {
         private List<Dictionary<uint, long>> savedBattle = new();
@@ -474,8 +768,11 @@ internal class PluginUI : IDisposable
 
         private bool pendingRestore;
         private Vector2 pendingRestoreSize;
+        private bool pendingRestorePosition;
+        private Vector2 pendingRestorePos;
         private bool wasForcedMini;
         private bool wasInMiniMode;
+        private bool draggingMiniIcon;
 
         public MainWindow(ACT plugin) : base("伤害统计")
         {
@@ -488,7 +785,7 @@ internal class PluginUI : IDisposable
             
             if (DalamudApi.Conditions[ConditionFlag.PvPDisplayActive]) return;
             var inCombat = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
-            var forceMini = config.autohide && !inCombat;
+            var forceMini = false;
             var inMiniModeNow = config.Mini || forceMini;
 
             if (!wasInMiniMode && inMiniModeNow)
@@ -496,6 +793,12 @@ internal class PluginUI : IDisposable
                 var beforeMiniSize = ImGui.GetWindowSize();
                 if (beforeMiniSize.X > 200 && beforeMiniSize.Y > 120)
                     config.WindowSize = beforeMiniSize;
+
+                config.MainWindowPos = ImGui.GetWindowPos();
+                config.HasMainWindowPos = true;
+
+                if (config.HasMiniWindowPos)
+                    ImGui.SetWindowPos(config.MiniWindowPos, ImGuiCond.Always);
             }
 
             if (!inMiniModeNow && wasInMiniMode)
@@ -505,6 +808,12 @@ internal class PluginUI : IDisposable
                     restoreSize = new Vector2(480, 320);
                 pendingRestore = true;
                 pendingRestoreSize = restoreSize;
+
+                if (config.HasMainWindowPos)
+                {
+                    pendingRestorePosition = true;
+                    pendingRestorePos = config.MainWindowPos;
+                }
             }
 
             wasInMiniMode = inMiniModeNow;
@@ -539,6 +848,11 @@ internal class PluginUI : IDisposable
                     ImGui.SetWindowSize(pendingRestoreSize, ImGuiCond.Always);
                     config.WindowSize = pendingRestoreSize;
                 }
+                if (pendingRestorePosition)
+                {
+                    pendingRestorePosition = false;
+                    ImGui.SetWindowPos(pendingRestorePos, ImGuiCond.Always);
+                }
 
                 var currentSize = ImGui.GetWindowSize();
                 if (!restoringThisFrame && currentSize.X > 200 && currentSize.Y > 120)
@@ -553,13 +867,14 @@ internal class PluginUI : IDisposable
                         if (ImGui.ArrowButton("最小化", ImGuiDir.Left))
                         {
                             config.Mini = true;
+                            config.ShowVerticalList = false;
                             config.WindowSize = ImGui.GetWindowSize();
                             config.Save();
                             ImGui.EndMenuBar();
                             return;
                         }
 
-                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("最小化窗口");
+                        if (ImGui.IsItemHovered()) ImGui.SetTooltip("最小化（显示图标）");
                         ImGui.SameLine();
                         if (menuCompact)
                         {
@@ -617,6 +932,54 @@ internal class PluginUI : IDisposable
                                     changed |= ImGui.Checkbox("手动紧凑模式", ref config.CompactMode);
                                 else
                                     ImGui.TextDisabled("自动紧凑布局开启时，忽略“手动紧凑模式”。");
+
+                                var showList = !config.Mini;
+                                if (ImGui.Checkbox("显示纵向列表（关闭=最小化图标）", ref showList))
+                                {
+                                    config.Mini = !showList;
+                                    config.ShowVerticalList = showList;
+                                    changed = true;
+                                }
+
+                                var cardsEnabled = config.CardsEnabled;
+                                if (ImGui.Checkbox("显示独立名片", ref cardsEnabled))
+                                {
+                                    config.CardsEnabled = cardsEnabled;
+                                    if (instance?.cardsWindow != null)
+                                    {
+                                        instance.cardsWindow.IsOpen = cardsEnabled;
+                                        if (cardsEnabled) instance.cardsWindow.ResetPositioning();
+                                    }
+                                    changed = true;
+                                }
+                                else
+                                {
+                                    if (instance?.cardsWindow != null) instance.cardsWindow.IsOpen = config.CardsEnabled;
+                                }
+
+                                if (config.CardsEnabled)
+                                {
+                                    var layoutModes = new[] { "独立名片列", "独立名片行" };
+                                    var layoutMode = config.DisplayLayout;
+                                    if (ImGui.Combo("名片布局", ref layoutMode, layoutModes, layoutModes.Length))
+                                    {
+                                        config.DisplayLayout = layoutMode;
+                                        changed = true;
+                                    }
+
+                                    if (config.DisplayLayout == 0)
+                                    {
+                                        changed |= ImGui.SliderFloat("名片宽度(列)", ref config.CardColumnWidth, 120f, 800f);
+                                        changed |= ImGui.SliderFloat("名片高度(列)", ref config.CardColumnHeight, 24f, 200f);
+                                        changed |= ImGui.SliderFloat("名片间距(列)", ref config.CardColumnSpacing, 0f, 40f);
+                                    }
+                                    else
+                                    {
+                                        changed |= ImGui.SliderFloat("名片宽度(行)", ref config.CardRowWidth, 120f, 800f);
+                                        changed |= ImGui.SliderFloat("名片高度(行)", ref config.CardRowHeight, 24f, 200f);
+                                        changed |= ImGui.SliderFloat("名片间距(行)", ref config.CardRowSpacing, 0f, 40f);
+                                    }
+                                }
 
                                 ImGui.Separator();
                                 ImGui.TextDisabled("窗口");
@@ -703,6 +1066,54 @@ internal class PluginUI : IDisposable
                                 else
                                     ImGui.TextDisabled("自动紧凑布局开启时，忽略“手动紧凑模式”。");
 
+                                var showList = !config.Mini;
+                                if (ImGui.Checkbox("显示纵向列表（关闭=最小化图标）", ref showList))
+                                {
+                                    config.Mini = !showList;
+                                    config.ShowVerticalList = showList;
+                                    changed = true;
+                                }
+
+                                var cardsEnabled = config.CardsEnabled;
+                                if (ImGui.Checkbox("显示独立名片", ref cardsEnabled))
+                                {
+                                    config.CardsEnabled = cardsEnabled;
+                                    if (instance?.cardsWindow != null)
+                                    {
+                                        instance.cardsWindow.IsOpen = cardsEnabled;
+                                        if (cardsEnabled) instance.cardsWindow.ResetPositioning();
+                                    }
+                                    changed = true;
+                                }
+                                else
+                                {
+                                    if (instance?.cardsWindow != null) instance.cardsWindow.IsOpen = config.CardsEnabled;
+                                }
+
+                                if (config.CardsEnabled)
+                                {
+                                    var layoutModes = new[] { "独立名片列", "独立名片行" };
+                                    var layoutMode = config.DisplayLayout;
+                                    if (ImGui.Combo("名片布局", ref layoutMode, layoutModes, layoutModes.Length))
+                                    {
+                                        config.DisplayLayout = layoutMode;
+                                        changed = true;
+                                    }
+
+                                    if (config.DisplayLayout == 0)
+                                    {
+                                        changed |= ImGui.SliderFloat("名片宽度(列)", ref config.CardColumnWidth, 120f, 800f);
+                                        changed |= ImGui.SliderFloat("名片高度(列)", ref config.CardColumnHeight, 24f, 200f);
+                                        changed |= ImGui.SliderFloat("名片间距(列)", ref config.CardColumnSpacing, 0f, 40f);
+                                    }
+                                    else
+                                    {
+                                        changed |= ImGui.SliderFloat("名片宽度(行)", ref config.CardRowWidth, 120f, 800f);
+                                        changed |= ImGui.SliderFloat("名片高度(行)", ref config.CardRowHeight, 24f, 200f);
+                                        changed |= ImGui.SliderFloat("名片间距(行)", ref config.CardRowSpacing, 0f, 40f);
+                                    }
+                                }
+
                                 ImGui.Separator();
                                 if (ImGui.Button("清空筛选"))
                                     filter = string.Empty;
@@ -762,6 +1173,7 @@ internal class PluginUI : IDisposable
                     }
 
                     //if (!config.SaveData) 
+                    if (config.ShowVerticalList)
                         DrawData(battle);
                     //else DrawDataWithCalc(battle);
                 }
@@ -862,8 +1274,27 @@ internal class PluginUI : IDisposable
                 };
             });
 
+            var rankByActor = new Dictionary<uint, int>(rows.Count);
+            for (var i = 0; i < rows.Count; i++)
+                rankByActor[rows[i].Actor] = i + 1;
+
+            var localPlayerRank = localPlayerId != 0 && rankByActor.TryGetValue(localPlayerId, out var lpr) ? lpr : 0;
+
+            var showingPinnedSelf = false;
             if (config.TopN > 0 && rows.Count > config.TopN)
-                rows = rows.Take(config.TopN).ToList();
+            {
+                if (localPlayerRank > config.TopN && string.IsNullOrWhiteSpace(filterText))
+                {
+                    var othersCount = Math.Max(0, config.TopN - 1);
+                    var selfRow = rows[localPlayerRank - 1];
+                    rows = rows.Take(othersCount).Append(selfRow).ToList();
+                    showingPinnedSelf = true;
+                }
+                else
+                {
+                    rows = rows.Take(config.TopN).ToList();
+                }
+            }
 
             var compact = config.AutoCompact
                 ? ImGui.GetContentRegionAvail().X < 520
@@ -884,7 +1315,9 @@ internal class PluginUI : IDisposable
             if (!string.IsNullOrWhiteSpace(filterText) || config.TopN > 0)
             {
                 var showFilter = string.IsNullOrWhiteSpace(filterText) ? "（无）" : filterText;
-                var showTopN = config.TopN > 0 ? $"前{config.TopN}" : "全部";
+                var showTopN = config.TopN > 0
+                    ? (showingPinnedSelf ? (config.TopN <= 1 ? "自己" : $"前{config.TopN - 1}+自己") : $"前{config.TopN}")
+                    : "全部";
                 ImGui.TextDisabled($"当前视图：{showTopN}，筛选：{showFilter}");
             }
 
@@ -913,10 +1346,9 @@ internal class PluginUI : IDisposable
                 ImGui.TableSetupColumn("秒伤", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoHide, 110f);
                 ImGui.TableHeadersRow();
 
-                var rank = 0;
                 foreach (var r in rows)
                 {
-                    rank++;
+                    var rank = rankByActor.TryGetValue(r.Actor, out var realRank) ? realRank : 0;
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn();
                     if (_plugin.Icon.TryGetValue(r.JobId, out var icon) && icon != null)
@@ -1006,20 +1438,6 @@ internal class PluginUI : IDisposable
                     if (ImGui.IsItemHovered()) DrawLimitBreak();
                 }
 
-                ImGui.TableNextRow(); //Total Damage
-                ImGui.TableNextColumn();
-                ImGui.TableNextColumn();
-                ImGui.Text("全场总计");
-                ImGui.TableNextColumn();
-                if (showRates)
-                {
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                    ImGui.TableNextColumn();
-                }
-                ImGui.TableNextColumn();
-                ImGui.Text($"{(float)totalDamageAll / seconds:F1}");
-
                 if (canSimDots && battle.TotalDotDamage != 0 && config.delta) //Dot Simulation
                 {
                     ImGui.TableNextRow();
@@ -1039,6 +1457,105 @@ internal class PluginUI : IDisposable
             }
             ImGui.EndTable();
             ImGui.PopStyleVar();
+        }
+
+        private void DrawDataCardsRow(
+            ACTBattle battle,
+            List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)> rows,
+            Dictionary<uint, int> rankByActor,
+            uint localPlayerId,
+            float seconds,
+            float maxDps,
+            bool compact,
+            bool canSimDots,
+            long limitDamage)
+        {
+            var style = ImGui.GetStyle();
+            var lineHeight = ImGui.GetTextLineHeight();
+            var cardWidth = compact ? 210f : 260f;
+            var cardHeight = compact ? (lineHeight * 3.4f) : (lineHeight * 3.9f);
+
+            ImGui.BeginChild($"ACTCards##{config.TableLayoutSeed}", new Vector2(0, cardHeight + style.WindowPadding.Y * 2), false,
+                ImGuiWindowFlags.HorizontalScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+            try
+            {
+                for (var i = 0; i < rows.Count; i++)
+                {
+                    var r = rows[i];
+                    var rank = rankByActor.TryGetValue(r.Actor, out var realRank) ? realRank : 0;
+
+                    ImGui.PushID((int)r.Actor);
+                    var isSelf = config.HighlightSelf && r.Actor == localPlayerId;
+                    ImGui.BeginChild("##card", new Vector2(cardWidth, cardHeight), true,
+                        ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+                    try
+                    {
+                        var cardStartX = ImGui.GetCursorPosX();
+
+                        var iconSize = lineHeight * 1.3f;
+                        if (_plugin.Icon.TryGetValue(r.JobId, out var icon) && icon != null)
+                            ImGui.Image(icon.Handle, new Vector2(iconSize, iconSize));
+                        else
+                            ImGui.Dummy(new Vector2(iconSize, iconSize));
+
+                        ImGui.SameLine();
+                        ImGui.BeginGroup();
+                        var displayName = config.HideName
+                            ? JobNameCn(r.JobId)
+                            : battle.Name.GetValueOrDefault(r.Actor, JobNameCn(r.JobId));
+
+                        ImGui.Text($"{rank}. {displayName}");
+
+                        ImGui.TextDisabled($"死亡 {r.Death:D}");
+                        ImGui.EndGroup();
+
+                        var afterHeaderY = ImGui.GetCursorPosY();
+                        ImGui.SetCursorPosX(cardStartX);
+                        ImGui.SetCursorPosY(afterHeaderY);
+
+                        var dps = seconds <= 0 ? 0 : (float)r.Damage / seconds;
+                        var frac = maxDps <= 0 ? 0 : dps / maxDps;
+                        if (frac < 0) frac = 0;
+                        if (frac > 1) frac = 1;
+
+                        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
+                        var barColor = isSelf
+                            ? new Vector4(0.3f, 0.9f, 0.3f, 0.9f)
+                            : new Vector4(0.25f, 0.65f, 1f, 0.9f);
+                        ImGui.PushStyleColor(ImGuiCol.PlotHistogram, barColor);
+                        ImGui.ProgressBar(frac, new Vector2(-1, lineHeight), $"{dps:F1}");
+                        ImGui.PopStyleColor();
+                        ImGui.PopStyleVar();
+                    }
+                    finally
+                    {
+                        ImGui.EndChild();
+                    }
+
+                    if (ImGui.IsItemHovered()) DrawDetails(r.Actor);
+                    ImGui.PopID();
+
+                    if (i != rows.Count - 1)
+                        ImGui.SameLine();
+                }
+            }
+            finally
+            {
+                ImGui.EndChild();
+            }
+
+            if (battle.TotalDotDamage != 0 && !canSimDots)
+                ImGui.TextDisabled($"DoT 伤害：{(float)battle.TotalDotDamage / battle.Duration():F1}");
+
+            if (limitDamage > 0)
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled($"极限技：{(float)limitDamage / seconds:F1}");
+                if (ImGui.IsItemHovered()) DrawLimitBreak();
+            }
+
+            if (canSimDots && battle.TotalDotDamage != 0 && config.delta)
+                ImGui.TextDisabled($"DoT 模拟偏差：{battle.TotalDotSim * 100 / battle.TotalDotDamage - 100:F2}%");
         }
 
         private void DrawDataWithCalc(ACTBattle battle)
@@ -1212,7 +1729,7 @@ internal class PluginUI : IDisposable
         }
 
 
-        private void DrawDetails(uint actor)
+        internal void DrawDetails(uint actor)
         {
             lock (_plugin.SyncRoot)
             {
@@ -1293,7 +1810,7 @@ internal class PluginUI : IDisposable
             {
                 ImGui.Text($"最大伤害：{sheet.GetRow(battle.DataDic[actor].MaxDamageSkill).Name.ExtractText()} - {battle.DataDic[actor].MaxDamage:N0}");
             }
-            ImGui.EndTooltip();
+                ImGui.EndTooltip();
             }
         }
 
@@ -1349,9 +1866,32 @@ internal class PluginUI : IDisposable
             ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4f, 4f));
             ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(2f, 2f));
             var clicked = ImGui.ImageButton(mainIcon.Handle, new Vector2(40f));
+            if (!clickThroughActive)
+            {
+                if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                    draggingMiniIcon = true;
+
+                if (draggingMiniIcon)
+                {
+                    if (ImGui.IsMouseDown(ImGuiMouseButton.Right))
+                    {
+                        ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
+                    }
+                    else
+                    {
+                        draggingMiniIcon = false;
+                        config.MiniWindowPos = ImGui.GetWindowPos();
+                        config.HasMiniWindowPos = true;
+                        config.Save();
+                    }
+                }
+            }
             if (clicked && !forced)
             {
+                config.MiniWindowPos = ImGui.GetWindowPos();
+                config.HasMiniWindowPos = true;
                 config.Mini = false;
+                config.ShowVerticalList = true;
                 config.Save();
                 var restoreSize = config.WindowSize;
                 if (restoreSize.X < 200 || restoreSize.Y < 120)
@@ -1363,7 +1903,8 @@ internal class PluginUI : IDisposable
             ImGui.PopStyleVar(2);
             ImGui.PopStyleColor(popStyle);
 
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip(forced ? "战斗外自动最小化（到设置里关闭）" : "还原");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(forced ? "最小化图标（右键拖动）" : "左键显示纵向列表，右键拖动图标");
         }
 
         public void Dispose()
