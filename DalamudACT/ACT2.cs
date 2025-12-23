@@ -81,13 +81,17 @@ namespace DalamudACT
 
                     for (var j = 0; j < 8; j++)
                     {
-                        if (effect->type == 3) //damage
+                        if (effect->type is 3 or 5 or 6) // Damage / Blocked / Parried
                         {
-                            long damage = effect->param0;
-                            if (effect->param5 == 0x40) damage += effect->param4 << 16;
-                            DalamudApi.Log.Verbose($"EffectEntry:{3},{sourceId:X}:{(uint)*target:X}:{header.actionId},{damage}");
-                            Battles[^1].AddEvent(EventKind.Damage, sourceId, (uint)*target, header.actionId, damage,
-                                effect->param1);
+                            var damage = (uint)effect->param0;
+                            if ((effect->param5 & 0x40) != 0)
+                                damage += (uint)(effect->param4 * 65536);
+
+                            var targetId = ((effect->param5 & 0x80) != 0) ? sourceId : (uint)*target;
+                            var critDh = (byte)(effect->param1 & 0x60);
+
+                            DalamudApi.Log.Verbose($"EffectEntry:{effect->type},{sourceId:X}:{targetId:X}:{header.actionId},{damage}");
+                            Battles[^1].AddEvent(EventKind.Damage, sourceId, targetId, header.actionId, damage, critDh);
                         }
 
                         effect++;
@@ -154,7 +158,8 @@ namespace DalamudACT
                     }
                     else
                     {
-                        Battles[^1].AddEvent(EventKind.Damage, 0xE000_0000, entityId, 0, arg1);
+                        // Prefer attributing the tick to the reported source (and avoid id=0 double-counting in AddEvent).
+                        Battles[^1].AddDotDamage(arg2, arg1);
                     }
                 }
             }

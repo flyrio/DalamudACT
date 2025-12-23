@@ -241,6 +241,21 @@ public class ACTBattle
         }
     }
 
+    public void AddDotDamage(uint from, long damage, byte dc = 0)
+    {
+        if ((DalamudApi.ObjectTable.LocalPlayer?.StatusFlags & StatusFlags.InCombat) == 0) return;
+        if (from > 0x40000000 || from == 0x0) return;
+
+        if (!Name.ContainsKey(from))
+        {
+            if (!AddPlayer(from)) return;
+        }
+        if (!DataDic.ContainsKey(from)) return;
+
+        DataDic[from].Damages[Total].AddDamage(damage);
+        DataDic[from].Damages[Total].AddDC(dc);
+    }
+
     private void CalcDot()
     {
         TotalDotSim = 0;
