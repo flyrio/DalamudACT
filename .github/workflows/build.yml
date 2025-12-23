@@ -3,8 +3,6 @@ name: .NET Build
 on:
   push:
     branches: '*'
-    tags:
-      - 'v*'
   pull_request:
 
 jobs:
@@ -51,13 +49,15 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          path: ./${{ env.repo_name }}/bin/Release/* 
-      
-      # 当推送 tag 时创建 Release
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: ${{ env.repo_name }}.zip
+          path: ./${{ env.repo_name }}/bin/Release/*
+
+      - name: Update Latest Release
+        uses: andelf/nightly-release@main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: latest
+          name: '最新构建'
+          body: '自动构建的最新版本'
+          files: |
+            ${{ env.repo_name }}.zip
