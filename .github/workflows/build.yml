@@ -22,12 +22,13 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+          include-prerelease: true
       - name: Restore dependencies
         run: dotnet restore
-      - name: Download Dalamud
+      - name: Download Dalamud CN
         run: |
-          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/stg/latest.zip -OutFile latest.zip
-          Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev\"
+          Invoke-WebRequest -Uri https://aonyx.ffxiv.wang/Dalamud/Release/Runtime/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip "$env:AppData\XIVLauncherCN\addon\Hooks\dev\"
       - name: Build
         run: |
           dotnet build --no-restore --configuration Release --nologo
