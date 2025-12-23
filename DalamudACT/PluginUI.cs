@@ -343,19 +343,39 @@ internal class PluginUI : IDisposable
 
                         if (config.DisplayLayout == 0)
                         {
+                            changed |= ImGui.SliderFloat("名片缩放", ref config.CardsScale, 0.5f, 2.0f);
+                            if (ImGui.IsItemDeactivatedAfterEdit())
+                                _plugin.RefreshCardsFont();
                             changed |= ImGui.SliderFloat("名片宽度(列)", ref config.CardColumnWidth, 120f, 800f);
                             changed |= ImGui.SliderFloat("名片高度(列)", ref config.CardColumnHeight, 24f, 200f);
                             changed |= ImGui.SliderFloat("名片间距(列)", ref config.CardColumnSpacing, 0f, 40f);
+                            changed |= ImGui.SliderInt("每列名片数", ref config.CardsPerLine, 1, 24);
                         }
                         else
                         {
+                            changed |= ImGui.SliderFloat("名片缩放", ref config.CardsScale, 0.5f, 2.0f);
+                            if (ImGui.IsItemDeactivatedAfterEdit())
+                                _plugin.RefreshCardsFont();
                             changed |= ImGui.SliderFloat("名片宽度(行)", ref config.CardRowWidth, 120f, 800f);
                             changed |= ImGui.SliderFloat("名片高度(行)", ref config.CardRowHeight, 24f, 200f);
                             changed |= ImGui.SliderFloat("名片间距(行)", ref config.CardRowSpacing, 0f, 40f);
+                            changed |= ImGui.SliderInt("每行名片数", ref config.CardsPerLine, 1, 24);
                         }
                     }
 
                     var sortModes = new[] { "按秒伤", "按总伤害", "按姓名" };
+                    if (config.CardsEnabled)
+                    {
+                        var placementMode = config.CardsPlacementMode;
+                        if (ImGui.Checkbox("名片摆放模式(脱战预览)", ref placementMode))
+                        {
+                            config.CardsPlacementMode = placementMode;
+                            changed = true;
+                        }
+                        if (placementMode)
+                            ImGui.TextDisabled("提示: 脱战会显示预览名片，可以拖动（穿透开启时按住alt）松开自动保存位置。");
+                    }
+
                     var sortMode = config.SortMode;
                     if (ImGui.Combo("排序方式", ref sortMode, sortModes, sortModes.Length))
                     {
@@ -539,29 +559,64 @@ internal class PluginUI : IDisposable
                     (clickThroughActive ? (ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoMouseInputs) : ImGuiWindowFlags.None);
             BgAlpha = 0f;
 
-            ACTBattle battle;
+            var inCombatNow = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
+
+            ACTBattle? battle = null;
+            Dictionary<uint, string>? nameByActor = null;
             var seconds = 1f;
             var canSimDots = false;
+            var isPreview = false;
             lock (_plugin.SyncRoot)
             {
-                if (_plugin.Battles.Count < 1) return;
+                if (_plugin.Battles.Count < 1)
+                {
+                    isPreview = true;
+                }
+                else
+                {
+                    var inCombat = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
+                    var idx = choosed;
+                    if (inCombat && _plugin.Battles[^1].StartTime != 0) idx = _plugin.Battles.Count - 1;
+                    idx = Math.Clamp(idx, 0, _plugin.Battles.Count - 1);
+                    battle = _plugin.Battles[idx];
+                    if (battle.StartTime == 0)
+                        isPreview = true;
 
-                var inCombat = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
-                var idx = choosed;
-                if (inCombat && _plugin.Battles[^1].StartTime != 0) idx = _plugin.Battles.Count - 1;
-                idx = Math.Clamp(idx, 0, _plugin.Battles.Count - 1);
-                battle = _plugin.Battles[idx];
-                if (battle.StartTime == 0) return;
+                    if (!isPreview)
+                    {
+                        seconds = battle.Duration();
+                        canSimDots = battle.Level is >= 64 && !float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0;
+                        nameByActor = battle.Name;
+                    }
+                }
+            }
 
-                seconds = battle.Duration();
-                canSimDots = battle.Level is >= 64 && !float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0;
+            if (!inCombatNow && !config.CardsPlacementMode) return;
+
+            if ((isPreview || config.CardsPlacementMode) && !inCombatNow)
+            {
+                nameByActor = new Dictionary<uint, string>();
+                var previewJobs = new[] { 19u, 21u, 24u, 27u, 28u, 31u, 35u, 38u };
+                var previewRows = new List<(uint Actor, uint JobId, long Damage, uint Death)>();
+                for (var i = 0; i < previewJobs.Length; i++)
+                {
+                    var actorId = (uint)(i + 1);
+                    nameByActor[actorId] = $"预览 {i + 1}";
+                    previewRows.Add((actorId, previewJobs[i], (previewJobs.Length - i) * 1000, 0));
+                }
+
+                seconds = 1f;
+                canSimDots = false;
+
+                DrawRows(previewRows, nameByActor, seconds, clickThroughActive, localPlayerId: 0, battle: null);
+                return;
             }
 
             Dictionary<uint, float>? dotByActor = null;
             if (canSimDots)
             {
                 dotByActor = new Dictionary<uint, float>();
-                foreach (var (active, dotDmg) in battle.DotDmgList)
+                foreach (var (active, dotDmg) in battle!.DotDmgList)
                 {
                     var source = (uint)(active & 0xFFFFFFFF);
                     dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
@@ -569,7 +624,7 @@ internal class PluginUI : IDisposable
             }
 
             var localPlayerId = DalamudApi.ObjectTable.LocalPlayer?.EntityId ?? 0;
-            var rows = new List<(uint Actor, uint JobId, long Damage, uint Death)>(battle.DataDic.Count);
+            var rows = new List<(uint Actor, uint JobId, long Damage, uint Death)>(battle!.DataDic.Count);
             foreach (var (actor, damage) in battle.DataDic)
             {
                 var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
@@ -579,13 +634,32 @@ internal class PluginUI : IDisposable
                 rows.Add((actor, damage.JobId, totalDamage, damage.Death));
             }
 
+            DrawRows(rows, nameByActor ?? battle.Name, seconds, clickThroughActive, localPlayerId, battle);
+        }
+
+        private void DrawRows(
+            List<(uint Actor, uint JobId, long Damage, uint Death)> rows,
+            Dictionary<uint, string> nameByActor,
+            float seconds,
+            bool clickThroughActive,
+            uint localPlayerId,
+            ACTBattle? battle)
+        {
+            var cardScale = Math.Clamp(config.CardsScale, 0.5f, 2.0f);
+            var pushedFont = false;
+            if (_plugin.CardsFontHandle != null && _plugin.CardsFontHandle.Available)
+            {
+                _plugin.CardsFontHandle.Push();
+                pushedFont = true;
+            }
+
             rows.Sort((a, b) =>
             {
                 return config.SortMode switch
                 {
                     2 => StringComparer.CurrentCulture.Compare(
-                        battle.Name.GetValueOrDefault(a.Actor, JobNameCn(a.JobId)),
-                        battle.Name.GetValueOrDefault(b.Actor, JobNameCn(b.JobId))),
+                        nameByActor.GetValueOrDefault(a.Actor, JobNameCn(a.JobId)),
+                        nameByActor.GetValueOrDefault(b.Actor, JobNameCn(b.JobId))),
                     1 => b.Damage.CompareTo(a.Damage),
                     _ => ((float)b.Damage / seconds).CompareTo((float)a.Damage / seconds),
                 };
@@ -613,9 +687,13 @@ internal class PluginUI : IDisposable
             var maxDps = rows.Count == 0 ? 0 : rows.Max(r => (float)r.Damage / seconds);
             var lineHeight = ImGui.GetTextLineHeight();
 
-            var cardWidth = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnWidth : config.CardRowWidth, 120f, 800f);
-            var cardHeight = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnHeight : config.CardRowHeight, lineHeight * 2.2f, 300f);
-            var spacing = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnSpacing : config.CardRowSpacing, 0f, 40f);
+            var baseCardWidth = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnWidth : config.CardRowWidth, 120f, 800f);
+            var baseCardHeight = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnHeight : config.CardRowHeight, 24f, 300f);
+            var baseSpacing = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnSpacing : config.CardRowSpacing, 0f, 40f);
+
+            var cardWidth = baseCardWidth * cardScale;
+            var cardHeight = Math.Max(baseCardHeight * cardScale, lineHeight * 2.2f);
+            var spacing = baseSpacing * cardScale;
 
             if (!clickThroughActive && ImGui.IsWindowHovered())
             {
@@ -670,7 +748,7 @@ internal class PluginUI : IDisposable
                     ImGui.SameLine();
                     var displayName = config.HideName
                         ? JobNameCn(r.JobId)
-                        : battle.Name.GetValueOrDefault(r.Actor, JobNameCn(r.JobId));
+                        : nameByActor.GetValueOrDefault(r.Actor, JobNameCn(r.JobId));
                     ImGui.Text($"{rank}. {displayName}");
 
                     var dps = seconds <= 0 ? 0 : (float)r.Damage / seconds;
@@ -696,7 +774,10 @@ internal class PluginUI : IDisposable
                 }
 
                 if (!clickThroughActive && ImGui.IsItemHovered())
-                    instance?.mainWindow?.DrawDetails(r.Actor);
+                {
+                    if (battle != null)
+                        instance?.mainWindow?.DrawDetails(r.Actor);
+                }
 
                 if (!clickThroughActive && ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
                     dragStartRequested = true;
@@ -704,21 +785,60 @@ internal class PluginUI : IDisposable
                 ImGui.PopID();
             }
 
-            for (var i = 0; i < rows.Count; i++)
+            var lineBreakSpacing = spacing > 0 ? spacing : 0.0001f;
+            if (config.DisplayLayout == 0)
             {
-                DrawCard(rows[i]);
+                var perCol = Math.Clamp(config.CardsPerLine, 1, 100);
+                var totalRows = Math.Min(perCol, rows.Count);
+                var totalCols = (rows.Count + perCol - 1) / perCol;
+                var contentW = totalCols <= 0 ? 0 : totalCols * cardWidth + (totalCols - 1) * spacing;
+                var contentH = totalRows <= 0 ? 0 : totalRows * cardHeight + (totalRows - 1) * lineBreakSpacing;
 
-                if (i == rows.Count - 1) continue;
+                var startPos = ImGui.GetCursorPos();
+                ImGui.Dummy(new Vector2(contentW, contentH));
+                var afterDummy = ImGui.GetCursorPos();
+                ImGui.SetCursorPos(startPos);
 
-                if (config.DisplayLayout == 0)
+                for (var i = 0; i < rows.Count; i++)
                 {
-                    if (spacing > 0) ImGui.Dummy(new Vector2(1, spacing));
+                    var row = i % perCol;
+                    var col = i / perCol;
+                    ImGui.SetCursorPos(new Vector2(
+                        startPos.X + col * (cardWidth + spacing),
+                        startPos.Y + row * (cardHeight + lineBreakSpacing)));
+                    DrawCard(rows[i]);
                 }
-                else
-                {
-                    ImGui.SameLine(0, spacing);
-                }
+
+                ImGui.SetCursorPos(afterDummy);
             }
+            else
+            {
+                var perRow = Math.Clamp(config.CardsPerLine, 1, 100);
+                var totalCols = Math.Min(perRow, rows.Count);
+                var totalRows = (rows.Count + perRow - 1) / perRow;
+                var contentW = totalCols <= 0 ? 0 : totalCols * cardWidth + (totalCols - 1) * spacing;
+                var contentH = totalRows <= 0 ? 0 : totalRows * cardHeight + (totalRows - 1) * lineBreakSpacing;
+
+                var startPos = ImGui.GetCursorPos();
+                ImGui.Dummy(new Vector2(contentW, contentH));
+                var afterDummy = ImGui.GetCursorPos();
+                ImGui.SetCursorPos(startPos);
+
+                for (var i = 0; i < rows.Count; i++)
+                {
+                    var row = i / perRow;
+                    var col = i % perRow;
+                    ImGui.SetCursorPos(new Vector2(
+                        startPos.X + col * (cardWidth + spacing),
+                        startPos.Y + row * (cardHeight + lineBreakSpacing)));
+                    DrawCard(rows[i]);
+                }
+
+                ImGui.SetCursorPos(afterDummy);
+            }
+
+            if (pushedFont)
+                _plugin.CardsFontHandle!.Pop();
 
             if (!clickThroughActive)
             {
@@ -831,10 +951,9 @@ internal class PluginUI : IDisposable
                 if (_plugin.Battles.Count < 1) return;
                 if (inCombat && _plugin.Battles[^1].StartTime != 0) choosed = _plugin.Battles.Count - 1;
                 choosed = Math.Clamp(choosed, 0, _plugin.Battles.Count - 1);
-            var clickThroughActive = config.ClickThrough && !ImGui.GetIO().KeyAlt;
             Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.MenuBar | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar |
                     (config.NoResize ? ImGuiWindowFlags.NoResize : ImGuiWindowFlags.None) |
-                    (clickThroughActive ? ImGuiWindowFlags.NoInputs : ImGuiWindowFlags.None);
+                    ImGuiWindowFlags.None;
             BgAlpha = Math.Clamp(config.BGColor / 100f, 0f, 1f);
 
             var popStyle = PushBackgroundAlpha(config.BGColor / 100f);
@@ -969,15 +1088,23 @@ internal class PluginUI : IDisposable
 
                                     if (config.DisplayLayout == 0)
                                     {
+                                        changed |= ImGui.SliderFloat("名片缩放", ref config.CardsScale, 0.5f, 2.0f);
+                                        if (ImGui.IsItemDeactivatedAfterEdit())
+                                            _plugin.RefreshCardsFont();
                                         changed |= ImGui.SliderFloat("名片宽度(列)", ref config.CardColumnWidth, 120f, 800f);
                                         changed |= ImGui.SliderFloat("名片高度(列)", ref config.CardColumnHeight, 24f, 200f);
                                         changed |= ImGui.SliderFloat("名片间距(列)", ref config.CardColumnSpacing, 0f, 40f);
+                                        changed |= ImGui.SliderInt("每列名片数", ref config.CardsPerLine, 1, 24);
                                     }
                                     else
                                     {
+                                        changed |= ImGui.SliderFloat("名片缩放", ref config.CardsScale, 0.5f, 2.0f);
+                                        if (ImGui.IsItemDeactivatedAfterEdit())
+                                            _plugin.RefreshCardsFont();
                                         changed |= ImGui.SliderFloat("名片宽度(行)", ref config.CardRowWidth, 120f, 800f);
                                         changed |= ImGui.SliderFloat("名片高度(行)", ref config.CardRowHeight, 24f, 200f);
                                         changed |= ImGui.SliderFloat("名片间距(行)", ref config.CardRowSpacing, 0f, 40f);
+                                        changed |= ImGui.SliderInt("每行名片数", ref config.CardsPerLine, 1, 24);
                                     }
                                 }
 
@@ -1102,15 +1229,23 @@ internal class PluginUI : IDisposable
 
                                     if (config.DisplayLayout == 0)
                                     {
+                                        changed |= ImGui.SliderFloat("名片缩放", ref config.CardsScale, 0.5f, 2.0f);
+                                        if (ImGui.IsItemDeactivatedAfterEdit())
+                                            _plugin.RefreshCardsFont();
                                         changed |= ImGui.SliderFloat("名片宽度(列)", ref config.CardColumnWidth, 120f, 800f);
                                         changed |= ImGui.SliderFloat("名片高度(列)", ref config.CardColumnHeight, 24f, 200f);
                                         changed |= ImGui.SliderFloat("名片间距(列)", ref config.CardColumnSpacing, 0f, 40f);
+                                        changed |= ImGui.SliderInt("每列名片数", ref config.CardsPerLine, 1, 24);
                                     }
                                     else
                                     {
+                                        changed |= ImGui.SliderFloat("名片缩放", ref config.CardsScale, 0.5f, 2.0f);
+                                        if (ImGui.IsItemDeactivatedAfterEdit())
+                                            _plugin.RefreshCardsFont();
                                         changed |= ImGui.SliderFloat("名片宽度(行)", ref config.CardRowWidth, 120f, 800f);
                                         changed |= ImGui.SliderFloat("名片高度(行)", ref config.CardRowHeight, 24f, 200f);
                                         changed |= ImGui.SliderFloat("名片间距(行)", ref config.CardRowSpacing, 0f, 40f);
+                                        changed |= ImGui.SliderInt("每行名片数", ref config.CardsPerLine, 1, 24);
                                     }
                                 }
 
@@ -1853,11 +1988,9 @@ internal class PluginUI : IDisposable
             if (!config.Mini && !forced) return;
             if (mainIcon == null) return;
 
-            var clickThroughActive = config.ClickThrough && !ImGui.GetIO().KeyAlt;
             var flags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar |
                         ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
-                        (config.NoResize ? ImGuiWindowFlags.NoResize : ImGuiWindowFlags.None) |
-                        (clickThroughActive ? ImGuiWindowFlags.NoInputs : ImGuiWindowFlags.None);
+                        (config.NoResize ? ImGuiWindowFlags.NoResize : ImGuiWindowFlags.None);
             if (forced)
                 flags |= ImGuiWindowFlags.NoBackground;
 
@@ -1868,24 +2001,21 @@ internal class PluginUI : IDisposable
             ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4f, 4f));
             ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(2f, 2f));
             var clicked = ImGui.ImageButton(mainIcon.Handle, new Vector2(40f));
-            if (!clickThroughActive)
-            {
-                if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
-                    draggingMiniIcon = true;
+            if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                draggingMiniIcon = true;
 
-                if (draggingMiniIcon)
+            if (draggingMiniIcon)
+            {
+                if (ImGui.IsMouseDown(ImGuiMouseButton.Right))
                 {
-                    if (ImGui.IsMouseDown(ImGuiMouseButton.Right))
-                    {
-                        ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
-                    }
-                    else
-                    {
-                        draggingMiniIcon = false;
-                        config.MiniWindowPos = ImGui.GetWindowPos();
-                        config.HasMiniWindowPos = true;
-                        config.Save();
-                    }
+                    ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
+                }
+                else
+                {
+                    draggingMiniIcon = false;
+                    config.MiniWindowPos = ImGui.GetWindowPos();
+                    config.HasMiniWindowPos = true;
+                    config.Save();
                 }
             }
             if (clicked && !forced)

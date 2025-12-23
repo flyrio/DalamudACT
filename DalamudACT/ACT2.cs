@@ -9,6 +9,8 @@ using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using DalamudACT.Struct;
+using Dalamud.Interface.GameFonts;
+using Dalamud.Interface.ManagedFontAtlas;
 using Lumina.Excel;
 using Lumina.Excel.Sheets;
 using Action = Lumina.Excel.Sheets.Action;
@@ -28,6 +30,7 @@ namespace DalamudACT
         public Dictionary<uint, IDalamudTextureWrap?> Icon = new();
         public List<ACTBattle> Battles = new(5);
         private ExcelSheet<TerritoryType> terrySheet;
+        internal IFontHandle? CardsFontHandle;
 
         private delegate void ReceiveAbilityDelegate(int sourceId, nint sourceCharacter, nint pos,
             nint effectHeader, nint effectArray, nint effectTrail);
@@ -267,6 +270,19 @@ namespace DalamudACT
             Configuration = DalamudApi.PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
             Configuration.Initialize(DalamudApi.PluginInterface);
 
+            try
+            {
+                ((Dalamud.Interface.UiBuilder)DalamudApi.PluginInterface.UiBuilder).RunWhenUiPrepared<int>(() =>
+                {
+                    RefreshCardsFont();
+                    return 0;
+                });
+            }
+            catch
+            {
+                // If UiBuilder isn't prepared yet, fall back to best-effort at runtime via settings changes.
+            }
+
             #region Hook
             {
                 // ReceiveAbility 签名保持不变
@@ -303,6 +319,28 @@ namespace DalamudACT
             DalamudApi.PluginInterface.UiBuilder.OpenMainUi += DrawMainUI;
         }
 
+        internal void RefreshCardsFont()
+        {
+            var uiBuilder = (Dalamud.Interface.UiBuilder)DalamudApi.PluginInterface.UiBuilder;
+            var atlas = uiBuilder.FontAtlas;
+
+            CardsFontHandle?.Dispose();
+            CardsFontHandle = null;
+
+            var scale = Math.Clamp(Configuration.CardsScale, 0.5f, 2.0f);
+            if (Math.Abs(scale - 1f) >= 0.01f)
+            {
+                var style = new GameFontStyle(GameFontFamily.Axis, Dalamud.Interface.UiBuilder.DefaultFontSizePt * scale);
+                CardsFontHandle = atlas.NewGameFontHandle(style);
+            }
+
+            // In newer Dalamud, BuildFontsOnNextFrame is not allowed when AutoRebuildMode is Async.
+            if (string.Equals(atlas.AutoRebuildMode.ToString(), "Async", StringComparison.OrdinalIgnoreCase))
+                _ = atlas.BuildFontsAsync();
+            else
+                atlas.BuildFontsOnNextFrame();
+        }
+
         public void Disable()
         {
             ActorControlSelfHook.Disable();
@@ -313,6 +351,7 @@ namespace DalamudACT
         public void Dispose()
         {
             DalamudApi.Framework.Update -= Update;
+            CardsFontHandle?.Dispose();
             PluginUi?.Dispose();
             foreach (var (id, texture) in Icon) texture?.Dispose();
             Disable();

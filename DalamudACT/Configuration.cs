@@ -8,7 +8,7 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 3;
+        private const int CurrentVersion = 4;
 
         public bool Lock;
         public bool NoResize;
@@ -33,6 +33,15 @@ namespace DalamudACT
 
         public bool ShowVerticalList = true;
         public bool CardsEnabled = false;
+        public bool CardsPlacementMode = false;
+        public int CardsPerLine = 1;
+        public float CardsScale = 1f;
+
+        // Backward-compat: older configs stored separate values per layout.
+        [Obsolete("Use CardsPerLine")]
+        public int CardsColumns = 1;
+        [Obsolete("Use CardsPerLine")]
+        public int CardsRows = 1;
         public int DisplayLayout = 0; // 0=独立名片列 1=独立名片行
 
         public float CardWidth = 260f;
@@ -61,6 +70,10 @@ namespace DalamudACT
         {
             this.pluginInterface = pluginInterface;
 
+            // Temporary toggle; always start off to avoid accidentally showing cards out of combat.
+            CardsPlacementMode = false;
+            if (CardsPerLine <= 0) CardsPerLine = 1;
+            if (CardsScale <= 0) CardsScale = 1f;
             if (Version < CurrentVersion)
             {
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列
@@ -86,6 +99,13 @@ namespace DalamudACT
                         CardRowHeight = CardHeight;
                         CardRowSpacing = CardSpacing;
                     }
+                }
+                if (Version <= 3)
+                {
+#pragma warning disable CS0618 // legacy config migration
+                    var legacy = DisplayLayout == 0 ? CardsColumns : CardsRows;
+                    CardsPerLine = legacy <= 0 ? 1 : legacy;
+#pragma warning restore CS0618
                 }
 
                 Version = CurrentVersion;
