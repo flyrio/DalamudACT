@@ -1,5 +1,6 @@
 ﻿namespace DalamudACT.Struct
 {
+#pragma warning disable CS0649 // Filled via Marshal.PtrToStructure
     internal struct ActorCast
     {
         public ushort action_id;
@@ -16,4 +17,5 @@
         public ushort posZ;
         public ushort unknown_3;
     }
+#pragma warning restore CS0649
 };

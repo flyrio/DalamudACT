@@ -23,9 +23,9 @@ internal class PluginUI : IDisposable
 {
     private static PluginUI? instance;
 
-    private static Configuration config;
+    private static Configuration config = null!;
 
-    private static ACT _plugin;
+    private static ACT _plugin = null!;
     public static int choosed;
     private static ExcelSheet<Action> sheet = DalamudApi.GameData.GetExcelSheet<Action>()!;
     public static ConcurrentDictionary<uint, IDalamudTextureWrap?> Icon = new();
@@ -568,7 +568,7 @@ internal class PluginUI : IDisposable
                 }
             }
 
-            var localPlayerId = DalamudApi.ClientState.LocalPlayer?.EntityId ?? 0;
+            var localPlayerId = DalamudApi.ObjectTable.LocalPlayer?.EntityId ?? 0;
             var rows = new List<(uint Actor, uint JobId, long Damage, uint Death)>(battle.DataDic.Count);
             foreach (var (actor, damage) in battle.DataDic)
             {
@@ -1231,7 +1231,7 @@ internal class PluginUI : IDisposable
                 }
             }
 
-            var localPlayerId = DalamudApi.ClientState.LocalPlayer?.EntityId ?? 0;
+            var localPlayerId = DalamudApi.ObjectTable.LocalPlayer?.EntityId ?? 0;
             var filterText = filter.Trim();
             var rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(battle.DataDic.Count);
             long actorDamageTotal = 0;
@@ -1243,10 +1243,11 @@ internal class PluginUI : IDisposable
 
                 actorDamageTotal += totalDamage;
 
-                var swings = damage.Damages.TryGetValue(0, out var baseDamage) ? baseDamage.swings : 0;
-                var dRate = swings == 0 ? -1f : (float)baseDamage.D / swings;
-                var cRate = swings == 0 ? -1f : (float)baseDamage.C / swings;
-                var dcRate = swings == 0 ? -1f : (float)baseDamage.DC / swings;
+                damage.Damages.TryGetValue(0, out var baseDamage);
+                var swings = baseDamage?.swings ?? 0;
+                var dRate = swings == 0 ? -1f : (float)baseDamage!.D / swings;
+                var cRate = swings == 0 ? -1f : (float)baseDamage!.C / swings;
+                var dcRate = swings == 0 ? -1f : (float)baseDamage!.DC / swings;
                 rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
             }
 
@@ -1850,6 +1851,7 @@ internal class PluginUI : IDisposable
         private void DrawMini(bool forced)
         {
             if (!config.Mini && !forced) return;
+            if (mainIcon == null) return;
 
             var clickThroughActive = config.ClickThrough && !ImGui.GetIO().KeyAlt;
             var flags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar |

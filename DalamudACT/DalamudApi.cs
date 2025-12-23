@@ -35,20 +35,20 @@ public class DalamudApi
     // @formatter:on
 
 
-    [PluginService] public static IChatGui ChatGui { get; private set; }
-    [PluginService] public static IKeyState KeyState { get; private set; }
-    [PluginService] public static IToastGui Toasts { get; private set; }
-    [PluginService] public static IGameConfig GameConfig { get; private set; }
-    [PluginService] public static ITextureProvider TextureProvider { get; private set; }
-    [PluginService] public static ITextureSubstitutionProvider TextureSubstitutionProvider { get; private set; }
-    [PluginService] public static ITextureReadbackProvider TextureReadbackProvider { get; private set; }
-    [PluginService] public static IAddonLifecycle AddonLifecycle { get; private set; }
-    [PluginService] public static IDtrBar DtrBar { get; private set; }
-    [PluginService] public static IDutyState DutyState { get; private set; }
-    [PluginService] public static INotificationManager NotificationManager { get; private set; }
-    [PluginService] public static IContextMenu ContextMenu { get; private set; }
-    [PluginService] public static INamePlateGui NamePlateGui { get; private set; }
-    [PluginService] public static IPlayerState PlayerState { get; private set; }
+    [PluginService] public static IChatGui ChatGui { get; private set; } = null!;
+    [PluginService] public static IKeyState KeyState { get; private set; } = null!;
+    [PluginService] public static IToastGui Toasts { get; private set; } = null!;
+    [PluginService] public static IGameConfig GameConfig { get; private set; } = null!;
+    [PluginService] public static ITextureProvider TextureProvider { get; private set; } = null!;
+    [PluginService] public static ITextureSubstitutionProvider TextureSubstitutionProvider { get; private set; } = null!;
+    [PluginService] public static ITextureReadbackProvider TextureReadbackProvider { get; private set; } = null!;
+    [PluginService] public static IAddonLifecycle AddonLifecycle { get; private set; } = null!;
+    [PluginService] public static IDtrBar DtrBar { get; private set; } = null!;
+    [PluginService] public static IDutyState DutyState { get; private set; } = null!;
+    [PluginService] public static INotificationManager NotificationManager { get; private set; } = null!;
+    [PluginService] public static IContextMenu ContextMenu { get; private set; } = null!;
+    [PluginService] public static INamePlateGui NamePlateGui { get; private set; } = null!;
+    [PluginService] public static IPlayerState PlayerState { get; private set; } = null!;
     
 
     public static async Task<T> RunOnFrameworkThread<T>(Func<T> func, [CallerMemberName] string callerMember = "", [CallerFilePath] string callerFilePath = "", [CallerLineNumber] int callerLineNumber = 0)
