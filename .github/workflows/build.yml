@@ -42,7 +42,7 @@ jobs:
         run: |
           $dalamudPath = "$env:AppData\XIVLauncherCN\addon\Hooks\dev\"
           dotnet build --no-restore --configuration Release --nologo -p:DalamudLibPath="$dalamudPath"
-
+ 
       - name: Archive
         run: Compress-Archive -Path ${{ env.repo_name }}/bin/Release/* -DestinationPath ${{ env.repo_name }}.zip
 
