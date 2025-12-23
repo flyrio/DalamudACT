@@ -51,7 +51,7 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          path: ./${{ env.repo_name }}/bin/Release/*
+          path: ./${{ env.repo_name }}/bin/Release/* 
       
       # 当推送 tag 时创建 Release
       - name: Create Release
