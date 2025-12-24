@@ -8,10 +8,12 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 6;
+        private const int CurrentVersion = 7;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
+        public Vector2 SummaryWindowPos = Vector2.Zero;
+        public bool HasSummaryWindowPos = false;
         public bool HideName;
         public bool ClickThrough = false;
 
@@ -43,8 +45,33 @@ namespace DalamudACT
 
             // Temporary toggle; always start off to avoid accidentally showing cards out of combat.
             CardsPlacementMode = false;
-            if (CardsPerLine <= 0) CardsPerLine = 1;
-            if (CardsScale <= 0) CardsScale = 1f;
+            var changed = false;
+
+            if (CardsPerLine <= 0)
+            {
+                CardsPerLine = 1;
+                changed = true;
+            }
+
+            if (CardsScale <= 0)
+            {
+                CardsScale = 1f;
+                changed = true;
+            }
+
+            const float minCardWidth = 160f;
+            if (CardColumnWidth < minCardWidth)
+            {
+                CardColumnWidth = minCardWidth;
+                changed = true;
+            }
+
+            if (CardRowWidth < minCardWidth)
+            {
+                CardRowWidth = minCardWidth;
+                changed = true;
+            }
+
             if (Version < CurrentVersion)
             {
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列
@@ -52,11 +79,15 @@ namespace DalamudACT
                 {
                     CardsEnabled = DisplayLayout == 1;
                     DisplayLayout = 0;
+                    changed = true;
                 }
 
                 Version = CurrentVersion;
                 Save();
+                changed = false;
             }
+
+            if (changed) Save();
         }
 
         public void Save()

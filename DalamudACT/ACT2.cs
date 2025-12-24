@@ -321,7 +321,6 @@ namespace DalamudACT
 
             DalamudApi.PluginInterface.UiBuilder.Draw += DrawUI;
             DalamudApi.PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUI;
-            DalamudApi.PluginInterface.UiBuilder.OpenMainUi += DrawMainUI;
         }
 
         internal void RefreshCardsFont()
@@ -373,9 +372,10 @@ namespace DalamudACT
                     Configuration.CardsEnabled = !Configuration.CardsEnabled;
                     Configuration.Save();
                     PluginUi.cardsWindow.IsOpen = Configuration.CardsEnabled;
+                    PluginUi.summaryWindow.IsOpen = Configuration.CardsEnabled;
                     break;
                 case "config":
-                    PluginUi.configWindow.IsOpen = true;
+                    PluginUi.configWindow.IsOpen = !PluginUi.configWindow.IsOpen;
                     break;
                 case "prev":
                     PluginUi.cardsWindow.NudgeHistory(1);
@@ -396,12 +396,7 @@ namespace DalamudACT
 
         public void DrawConfigUI()
         {
-            PluginUi.configWindow.IsOpen = true;
-        }
-
-        public void DrawMainUI()
-        {
-            PluginUi.configWindow.IsOpen = true;
+            PluginUi.configWindow.IsOpen = !PluginUi.configWindow.IsOpen;
         }
     }
 }
