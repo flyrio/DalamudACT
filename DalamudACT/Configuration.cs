@@ -8,7 +8,7 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 7;
+        private const int CurrentVersion = 8;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
@@ -21,6 +21,7 @@ namespace DalamudACT
         public bool HighlightSelf = true;
 
         public bool CardsEnabled = false;
+        public bool SummaryEnabled = true;
         public bool CardsPlacementMode = false;
         public int CardsPerLine = 1;
         public float CardsScale = 1f;
@@ -74,6 +75,11 @@ namespace DalamudACT
 
             if (Version < CurrentVersion)
             {
+                if (Version < 8)
+                {
+                    SummaryEnabled = true;
+                }
+
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列
                 if (Version <= 1)
                 {

@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Interface.Windowing;
 using DalamudACT.Struct;
@@ -308,7 +309,7 @@ internal class PluginUI : IDisposable
         WindowSystem.AddWindow(summaryWindow);
 
         cardsWindow.IsOpen = config.CardsEnabled;
-        summaryWindow.IsOpen = config.CardsEnabled;
+        summaryWindow.IsOpen = config.CardsEnabled && config.SummaryEnabled;
     }
 
     public void Dispose()
@@ -358,8 +359,8 @@ internal class PluginUI : IDisposable
 
                         if (instance?.summaryWindow != null)
                         {
-                            instance.summaryWindow.IsOpen = cardsEnabled;
-                            if (cardsEnabled) instance.summaryWindow.ResetPositioning();
+                            instance.summaryWindow.IsOpen = cardsEnabled && config.SummaryEnabled;
+                            if (cardsEnabled && config.SummaryEnabled) instance.summaryWindow.ResetPositioning();
                         }
 
                         changed = true;
@@ -367,11 +368,28 @@ internal class PluginUI : IDisposable
                     else
                     {
                         if (instance?.cardsWindow != null) instance.cardsWindow.IsOpen = config.CardsEnabled;
-                        if (instance?.summaryWindow != null) instance.summaryWindow.IsOpen = config.CardsEnabled;
+                        if (instance?.summaryWindow != null) instance.summaryWindow.IsOpen = config.CardsEnabled && config.SummaryEnabled;
                     }
 
                     if (config.CardsEnabled)
                     {
+                        var summaryEnabled = config.SummaryEnabled;
+                        if (ImGui.Checkbox("显示团队信息窗（总秒伤/极限技）", ref summaryEnabled))
+                        {
+                            config.SummaryEnabled = summaryEnabled;
+                            if (instance?.summaryWindow != null)
+                            {
+                                instance.summaryWindow.IsOpen = summaryEnabled;
+                                if (summaryEnabled) instance.summaryWindow.ResetPositioning();
+                            }
+
+                            changed = true;
+                        }
+                        else
+                        {
+                            if (instance?.summaryWindow != null) instance.summaryWindow.IsOpen = config.SummaryEnabled;
+                        }
+
                         var layoutModes = new[] { "独立名片列", "独立名片行" };
                         var layoutMode = config.DisplayLayout;
                         if (ImGui.Combo("名片布局", ref layoutMode, layoutModes, layoutModes.Length))
@@ -466,7 +484,7 @@ internal class PluginUI : IDisposable
         public override void Draw()
         {
             if (DalamudApi.Conditions[ConditionFlag.PvPDisplayActive]) return;
-            if (!config.CardsEnabled)
+            if (!config.CardsEnabled || !config.SummaryEnabled)
             {
                 IsOpen = false;
                 return;
@@ -592,6 +610,7 @@ internal class PluginUI : IDisposable
         private bool positionedFromConfig;
         private bool draggingCards;
         private readonly Dictionary<uint, SpringFloat> dpsBarSprings = new();
+        private readonly Dictionary<uint, IDalamudTextureWrap?> actionIconCache = new();
 
         public CardsWindow(ACT plugin) : base("伤害统计 - 名片列", ImGuiWindowFlags.AlwaysAutoResize, false)
         {
@@ -622,6 +641,37 @@ internal class PluginUI : IDisposable
 
             dpsBarSprings.Clear();
             ResetHistory();
+        }
+
+        private IDalamudTextureWrap? GetActionIcon(uint actionId)
+        {
+            if (actionIconCache.TryGetValue(actionId, out var cached))
+                return cached;
+
+            if (ACTBattle.ActionSheet == null || !ACTBattle.ActionSheet.TryGetRow(actionId, out var action))
+            {
+                actionIconCache[actionId] = null;
+                return null;
+            }
+
+            var iconId = (uint)action.Icon;
+            if (iconId == 0)
+            {
+                actionIconCache[actionId] = null;
+                return null;
+            }
+
+            try
+            {
+                var wrap = DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(iconId)).RentAsync().Result;
+                actionIconCache[actionId] = wrap;
+                return wrap;
+            }
+            catch
+            {
+                actionIconCache[actionId] = null;
+                return null;
+            }
         }
 
         public override void Draw()
@@ -1087,7 +1137,16 @@ internal class PluginUI : IDisposable
                                         name = action.Name.ExtractText();
                                     var pct = row.Damage <= 0 ? 0 : (float)skill.Damage / row.Damage;
                                     var skillDps = seconds <= 0 ? 0 : (float)skill.Damage / seconds;
-                                    ImGui.BulletText($"{name}  {skillDps:F1}  {skill.Damage:N0}  {pct:P0}");
+
+                                    var icon = GetActionIcon(skill.Id);
+                                    var iconSize = lineHeight * 1.2f;
+                                    ImGui.SetCursorPosX(ImGui.GetCursorPosX() + 2f);
+                                    if (icon != null)
+                                        ImGui.Image(icon.Handle, new Vector2(iconSize, iconSize));
+                                    else
+                                        ImGui.Dummy(new Vector2(iconSize, iconSize));
+                                    ImGui.SameLine(0f, 6f);
+                                    ImGui.TextColored(SecondaryTextColor, $"{name}  {skillDps:F1}  {skill.Damage:N0}  {pct:P0}");
                                 }
                             }
                         }
@@ -1126,6 +1185,9 @@ internal class PluginUI : IDisposable
 
         public void Dispose()
         {
+            foreach (var (_, icon) in actionIconCache)
+                icon?.Dispose();
+            actionIconCache.Clear();
         }
     }
 }

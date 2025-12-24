@@ -372,7 +372,7 @@ namespace DalamudACT
                     Configuration.CardsEnabled = !Configuration.CardsEnabled;
                     Configuration.Save();
                     PluginUi.cardsWindow.IsOpen = Configuration.CardsEnabled;
-                    PluginUi.summaryWindow.IsOpen = Configuration.CardsEnabled;
+                    PluginUi.summaryWindow.IsOpen = Configuration.CardsEnabled && Configuration.SummaryEnabled;
                     break;
                 case "config":
                     PluginUi.configWindow.IsOpen = !PluginUi.configWindow.IsOpen;
