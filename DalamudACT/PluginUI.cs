@@ -338,6 +338,8 @@ internal class PluginUI : IDisposable
                 {
                     changed |= ImGui.Checkbox("名片鼠标穿透（按住 Alt 临时拖动）", ref config.ClickThrough);
                     ImGui.TextDisabled("提示：开启穿透后名片不会响应鼠标操作（悬停详情仍会显示），按住 Alt 可临时拖动名片窗口。");
+                    changed |= ImGui.SliderFloat("名片背景透明度", ref config.CardsBackgroundAlpha, 0f, 1f);
+                    changed |= ImGui.SliderFloat("团队信息窗背景透明度", ref config.SummaryBackgroundAlpha, 0f, 1f);
                 }
 
                 if (ImGui.CollapsingHeader("显示", ImGuiTreeNodeFlags.DefaultOpen))
@@ -515,7 +517,7 @@ internal class PluginUI : IDisposable
             Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
                     ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoMove;
-            BgAlpha = 0.75f;
+            BgAlpha = config.SummaryBackgroundAlpha;
 
             var clearRequested = false;
 
@@ -916,7 +918,7 @@ internal class PluginUI : IDisposable
                     var winPos = ImGui.GetWindowPos();
                     var winSize = ImGui.GetWindowSize();
                     var rounding = lineHeight * 0.35f;
-                    drawList.AddRectFilled(winPos, winPos + winSize, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.28f)), rounding);
+                    drawList.AddRectFilled(winPos, winPos + winSize, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, config.CardsBackgroundAlpha)), rounding);
 
                     var iconSize = lineHeight * 1.2f;
                     var headerHeight = Math.Max(iconSize, lineHeight);

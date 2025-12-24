@@ -8,7 +8,7 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 8;
+        private const int CurrentVersion = 9;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
@@ -16,6 +16,8 @@ namespace DalamudACT
         public bool HasSummaryWindowPos = false;
         public bool HideName;
         public bool ClickThrough = false;
+        public float CardsBackgroundAlpha = 0.28f;
+        public float SummaryBackgroundAlpha = 0.75f;
 
         public bool ShowRates = true;
         public bool HighlightSelf = true;
@@ -73,11 +75,20 @@ namespace DalamudACT
                 changed = true;
             }
 
+            CardsBackgroundAlpha = Math.Clamp(CardsBackgroundAlpha, 0f, 1f);
+            SummaryBackgroundAlpha = Math.Clamp(SummaryBackgroundAlpha, 0f, 1f);
+
             if (Version < CurrentVersion)
             {
                 if (Version < 8)
                 {
                     SummaryEnabled = true;
+                }
+
+                if (Version < 9)
+                {
+                    CardsBackgroundAlpha = 0.28f;
+                    SummaryBackgroundAlpha = 0.75f;
                 }
 
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列
