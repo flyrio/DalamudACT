@@ -31,6 +31,7 @@ namespace DalamudACT
         public List<ACTBattle> Battles = new(5);
         private ExcelSheet<TerritoryType> terrySheet;
         internal IFontHandle? CardsFontHandle;
+        private bool wasInCombat;
 
         private delegate void ReceiveAbilityDelegate(int sourceId, nint sourceCharacter, nint pos,
             nint effectHeader, nint effectArray, nint effectTrail);
@@ -202,8 +203,10 @@ namespace DalamudACT
             var now = DateTimeOffset.Now.ToUnixTimeSeconds();
             lock (SyncRoot)
             {
-                if (Battles[^1].EndTime > 0 && !inCombat)
+                // Combat ended: freeze the last battle and keep it for browsing.
+                if (wasInCombat && !inCombat)
                 {
+                    Battles[^1].EndTime = now;
                     Battles[^1].ActiveDots.Clear();
                     if (Battles.Count == 5)
                     {
@@ -219,6 +222,8 @@ namespace DalamudACT
                     Battles[^1].EndTime = now;
                     Battles[^1].Zone = GetPlaceName();
                 }
+
+                wasInCombat = inCombat;
             }
         }
 
@@ -311,7 +316,7 @@ namespace DalamudACT
 
             DalamudApi.Commands.AddHandler("/act", new CommandInfo(OnCommand)
             {
-                HelpMessage = "/act 显示DAct主窗口\n /act config 显示设置窗口"
+                HelpMessage = "/act 开关独立名片\n/act config 打开设置窗口\n/act prev 查看上一场\n/act next 查看下一场\n/act clear 清空战斗记录"
             });
 
             DalamudApi.PluginInterface.UiBuilder.Draw += DrawUI;
@@ -365,13 +370,21 @@ namespace DalamudACT
             switch (args)
             {
                 case null or "":
-                    PluginUi.mainWindow.IsOpen = true;
+                    Configuration.CardsEnabled = !Configuration.CardsEnabled;
+                    Configuration.Save();
+                    PluginUi.cardsWindow.IsOpen = Configuration.CardsEnabled;
                     break;
                 case "config":
                     PluginUi.configWindow.IsOpen = true;
                     break;
-                case "debug":
-                    PluginUi.debugWindow.IsOpen = true;
+                case "prev":
+                    PluginUi.cardsWindow.NudgeHistory(1);
+                    break;
+                case "next":
+                    PluginUi.cardsWindow.NudgeHistory(-1);
+                    break;
+                case "clear":
+                    PluginUi.cardsWindow.ClearBattleHistory();
                     break;
             }
         }
@@ -388,7 +401,7 @@ namespace DalamudACT
 
         public void DrawMainUI()
         {
-            PluginUi.mainWindow.IsOpen = true;
+            PluginUi.configWindow.IsOpen = true;
         }
     }
 }
