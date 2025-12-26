@@ -430,7 +430,7 @@ internal class PluginUI : IDisposable
                     }
 
                     if (launcherEnabled)
-                        ImGui.TextDisabled("提示：悬浮入口可点击打开/关闭名片窗口；右键拖动（脱战且按住 Alt 或启用摆放模式）。");
+                        ImGui.TextDisabled("提示：左键打开/关闭名片窗口；右键单击打开设置；右键长按拖动位置，松开自动保存。");
 
                     if (config.CardsEnabled)
                     {
@@ -532,6 +532,9 @@ internal class PluginUI : IDisposable
     {
         private bool positionedFromConfig;
         private bool draggingLauncher;
+        private bool rightClickPending;
+        private Vector2 rightClickStartMouse;
+        private double rightClickStartTime;
         private string? loadedButtonImagePath;
         private IDalamudTextureWrap? loadedButtonImage;
         private bool buttonImageLoadFailed;
@@ -676,19 +679,19 @@ internal class PluginUI : IDisposable
                 ImGui.PopStyleColor(3);
             }
 
-            var inCombatNow = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
-            var altHeld = ImGui.GetIO().KeyAlt;
-            var dragAllowed = !inCombatNow && (config.CardsPlacementMode || altHeld);
-            if (!dragAllowed)
-                draggingLauncher = false;
-            else if (ImGui.IsWindowHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
-                draggingLauncher = true;
+            var io = ImGui.GetIO();
+            if (!draggingLauncher && ImGui.IsWindowHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            {
+                rightClickPending = true;
+                rightClickStartMouse = io.MousePos;
+                rightClickStartTime = ImGui.GetTime();
+            }
 
             if (draggingLauncher)
             {
-                if (dragAllowed && ImGui.IsMouseDown(ImGuiMouseButton.Right))
+                if (ImGui.IsMouseDown(ImGuiMouseButton.Right))
                 {
-                    ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
+                    ImGui.SetWindowPos(ImGui.GetWindowPos() + io.MouseDelta);
                 }
                 else
                 {
@@ -696,6 +699,29 @@ internal class PluginUI : IDisposable
                     config.LauncherWindowPos = ImGui.GetWindowPos();
                     config.HasLauncherWindowPos = true;
                     config.Save();
+                }
+            }
+            else if (rightClickPending)
+            {
+                if (ImGui.IsMouseDown(ImGuiMouseButton.Right))
+                {
+                    const float dragThreshold = 4f;
+                    const double longPressThresholdSeconds = 0.25;
+
+                    var delta = io.MousePos - rightClickStartMouse;
+                    var deltaSq = delta.X * delta.X + delta.Y * delta.Y;
+                    var heldSeconds = ImGui.GetTime() - rightClickStartTime;
+
+                    if (deltaSq >= dragThreshold * dragThreshold || heldSeconds >= longPressThresholdSeconds)
+                    {
+                        rightClickPending = false;
+                        draggingLauncher = true;
+                    }
+                }
+                else
+                {
+                    rightClickPending = false;
+                    if (instance?.configWindow != null) instance.configWindow.IsOpen = !instance.configWindow.IsOpen;
                 }
             }
         }
