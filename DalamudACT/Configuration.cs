@@ -8,12 +8,14 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 9;
+        private const int CurrentVersion = 12;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
         public Vector2 SummaryWindowPos = Vector2.Zero;
         public bool HasSummaryWindowPos = false;
+        public Vector2 LauncherWindowPos = Vector2.Zero;
+        public bool HasLauncherWindowPos = false;
         public bool HideName;
         public bool ClickThrough = false;
         public float CardsBackgroundAlpha = 0.28f;
@@ -24,6 +26,10 @@ namespace DalamudACT
 
         public bool CardsEnabled = false;
         public bool SummaryEnabled = true;
+        public bool LauncherEnabled = true;
+        public float LauncherButtonSize = 32f;
+        public bool LauncherUseImage = false;
+        public string LauncherButtonImagePath = string.Empty;
         public bool CardsPlacementMode = false;
         public int CardsPerLine = 1;
         public float CardsScale = 1f;
@@ -77,6 +83,8 @@ namespace DalamudACT
 
             CardsBackgroundAlpha = Math.Clamp(CardsBackgroundAlpha, 0f, 1f);
             SummaryBackgroundAlpha = Math.Clamp(SummaryBackgroundAlpha, 0f, 1f);
+            LauncherButtonSize = Math.Clamp(LauncherButtonSize, 16f, 200f);
+            LauncherButtonImagePath ??= string.Empty;
 
             if (Version < CurrentVersion)
             {
@@ -89,6 +97,22 @@ namespace DalamudACT
                 {
                     CardsBackgroundAlpha = 0.28f;
                     SummaryBackgroundAlpha = 0.75f;
+                }
+
+                if (Version < 10)
+                {
+                    LauncherEnabled = true;
+                }
+
+                if (Version < 11)
+                {
+                    LauncherButtonSize = 32f;
+                }
+
+                if (Version < 12)
+                {
+                    LauncherUseImage = false;
+                    LauncherButtonImagePath = string.Empty;
                 }
 
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列

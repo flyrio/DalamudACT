@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -26,6 +27,7 @@ internal class PluginUI : IDisposable
     public ConfigWindow configWindow;
     public CardsWindow cardsWindow;
     public SummaryWindow summaryWindow;
+    public LauncherWindow launcherWindow;
     public WindowSystem WindowSystem = new("伤害统计");
 
     private static string JobNameCn(uint jobId)
@@ -303,13 +305,16 @@ internal class PluginUI : IDisposable
         configWindow = new ConfigWindow(_plugin);
         cardsWindow = new CardsWindow(_plugin);
         summaryWindow = new SummaryWindow(_plugin);
+        launcherWindow = new LauncherWindow(_plugin);
 
         WindowSystem.AddWindow(configWindow);
         WindowSystem.AddWindow(cardsWindow);
         WindowSystem.AddWindow(summaryWindow);
+        WindowSystem.AddWindow(launcherWindow);
 
         cardsWindow.IsOpen = config.CardsEnabled;
         summaryWindow.IsOpen = config.CardsEnabled && config.SummaryEnabled;
+        launcherWindow.IsOpen = config.LauncherEnabled;
     }
 
     public void Dispose()
@@ -320,6 +325,7 @@ internal class PluginUI : IDisposable
         configWindow.Dispose();
         cardsWindow?.Dispose();
         summaryWindow?.Dispose();
+        launcherWindow?.Dispose();
     }
 
     public class ConfigWindow : Window, IDisposable
@@ -372,6 +378,59 @@ internal class PluginUI : IDisposable
                         if (instance?.cardsWindow != null) instance.cardsWindow.IsOpen = config.CardsEnabled;
                         if (instance?.summaryWindow != null) instance.summaryWindow.IsOpen = config.CardsEnabled && config.SummaryEnabled;
                     }
+
+                    var launcherEnabled = config.LauncherEnabled;
+                    if (ImGui.Checkbox("显示悬浮入口按钮", ref launcherEnabled))
+                    {
+                        config.LauncherEnabled = launcherEnabled;
+                        if (instance?.launcherWindow != null)
+                        {
+                            instance.launcherWindow.IsOpen = launcherEnabled;
+                            if (launcherEnabled) instance.launcherWindow.ResetPositioning();
+                        }
+
+                        changed = true;
+                    }
+                    else
+                    {
+                        if (instance?.launcherWindow != null) instance.launcherWindow.IsOpen = config.LauncherEnabled;
+                    }
+
+                    if (launcherEnabled)
+                        changed |= ImGui.SliderFloat("悬浮入口按钮大小", ref config.LauncherButtonSize, 16f, 200f);
+
+                    if (launcherEnabled)
+                    {
+                        var launcherUseImage = config.LauncherUseImage;
+                        if (ImGui.Checkbox("悬浮入口使用图片", ref launcherUseImage))
+                        {
+                            config.LauncherUseImage = launcherUseImage;
+                            instance?.launcherWindow?.ResetImageCache();
+                            changed = true;
+                        }
+
+                        if (launcherUseImage)
+                        {
+                            if (ImGui.InputText("图片路径", ref config.LauncherButtonImagePath, 512))
+                            {
+                                instance?.launcherWindow?.ResetImageCache();
+                                changed = true;
+                            }
+
+                            ImGui.SameLine();
+                            if (ImGui.SmallButton("清空"))
+                            {
+                                config.LauncherButtonImagePath = string.Empty;
+                                instance?.launcherWindow?.ResetImageCache();
+                                changed = true;
+                            }
+
+                            ImGui.TextDisabled("提示：支持 png/jpg 等常见图片格式。路径可填绝对路径，或相对插件配置目录。");
+                        }
+                    }
+
+                    if (launcherEnabled)
+                        ImGui.TextDisabled("提示：悬浮入口可点击打开/关闭名片窗口；右键拖动（脱战且按住 Alt 或启用摆放模式）。");
 
                     if (config.CardsEnabled)
                     {
@@ -469,6 +528,184 @@ internal class PluginUI : IDisposable
         }
     }
 
+    public class LauncherWindow : Window, IDisposable
+    {
+        private bool positionedFromConfig;
+        private bool draggingLauncher;
+        private string? loadedButtonImagePath;
+        private IDalamudTextureWrap? loadedButtonImage;
+        private bool buttonImageLoadFailed;
+
+        public LauncherWindow(ACT plugin) : base("伤害统计 - 悬浮入口", ImGuiWindowFlags.AlwaysAutoResize, false)
+        {
+        }
+
+        public void ResetPositioning()
+        {
+            positionedFromConfig = false;
+        }
+
+        public void ResetImageCache()
+        {
+            loadedButtonImagePath = null;
+            buttonImageLoadFailed = false;
+            loadedButtonImage?.Dispose();
+            loadedButtonImage = null;
+        }
+
+        private static string ResolveButtonImagePath(string rawPath)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath)) return string.Empty;
+
+            var path = Environment.ExpandEnvironmentVariables(rawPath.Trim());
+            if (Path.IsPathRooted(path))
+                return path;
+
+            try
+            {
+                var configDir = DalamudApi.PluginInterface.GetPluginConfigDirectory();
+                if (!string.IsNullOrWhiteSpace(configDir))
+                    return Path.Combine(configDir, path);
+            }
+            catch
+            {
+            }
+
+            return path;
+        }
+
+        private IDalamudTextureWrap? TryGetButtonImage()
+        {
+            if (!config.LauncherUseImage) return null;
+
+            var resolvedPath = ResolveButtonImagePath(config.LauncherButtonImagePath);
+            if (string.IsNullOrWhiteSpace(resolvedPath))
+            {
+                ResetImageCache();
+                return null;
+            }
+
+            if (string.Equals(resolvedPath, loadedButtonImagePath, StringComparison.OrdinalIgnoreCase))
+                return loadedButtonImage;
+
+            ResetImageCache();
+            loadedButtonImagePath = resolvedPath;
+
+            if (!File.Exists(resolvedPath))
+            {
+                buttonImageLoadFailed = true;
+                return null;
+            }
+
+            try
+            {
+                loadedButtonImage = DalamudApi.TextureProvider.GetFromFile(resolvedPath).RentAsync().Result;
+            }
+            catch
+            {
+                buttonImageLoadFailed = true;
+                loadedButtonImage?.Dispose();
+                loadedButtonImage = null;
+            }
+
+            return loadedButtonImage;
+        }
+
+        public override void Draw()
+        {
+            if (DalamudApi.Conditions[ConditionFlag.PvPDisplayActive]) return;
+            if (!config.LauncherEnabled)
+            {
+                IsOpen = false;
+                return;
+            }
+
+            if (!positionedFromConfig && config.HasLauncherWindowPos)
+            {
+                ImGui.SetWindowPos(config.LauncherWindowPos, ImGuiCond.Always);
+                positionedFromConfig = true;
+            }
+
+            Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
+                    ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
+                    ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoMove;
+            BgAlpha = 0f;
+
+            var cardsOpen = config.CardsEnabled;
+            var buttonSize = Math.Clamp(config.LauncherButtonSize, 16f, 200f);
+            var buttonVec = new Vector2(buttonSize, buttonSize);
+            var useImage = config.LauncherUseImage && !string.IsNullOrWhiteSpace(config.LauncherButtonImagePath);
+            var buttonImage = useImage ? TryGetButtonImage() : null;
+
+            ImGui.PushStyleColor(ImGuiCol.Button, cardsOpen ? new Vector4(0.25f, 0.65f, 1f, 0.90f) : new Vector4(0.15f, 0.15f, 0.15f, 0.90f));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, cardsOpen ? new Vector4(0.35f, 0.75f, 1f, 1f) : new Vector4(0.25f, 0.25f, 0.25f, 0.95f));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, cardsOpen ? new Vector4(0.20f, 0.60f, 0.90f, 1f) : new Vector4(0.20f, 0.20f, 0.20f, 1f));
+            try
+            {
+                var clicked = false;
+                if (buttonImage != null)
+                {
+                    var tint = cardsOpen ? new Vector4(1f, 1f, 1f, 1f) : new Vector4(1f, 1f, 1f, 0.65f);
+                    clicked = ImGui.ImageButton(buttonImage.Handle, buttonVec, Vector2.Zero, Vector2.One, 0, Vector4.Zero, tint);
+                }
+                else
+                {
+                    clicked = ImGui.Button("DPS", buttonVec);
+                }
+
+                if (clicked)
+                {
+                    var nextCardsOpen = !config.CardsEnabled;
+                    config.CardsEnabled = nextCardsOpen;
+                    config.Save();
+
+                    if (instance?.cardsWindow != null) instance.cardsWindow.IsOpen = nextCardsOpen;
+                    if (instance?.summaryWindow != null) instance.summaryWindow.IsOpen = nextCardsOpen && config.SummaryEnabled;
+                }
+
+                if (ImGui.IsItemHovered())
+                {
+                    if (buttonImage == null && useImage && buttonImageLoadFailed)
+                        ImGui.SetTooltip("图片加载失败，已回退为文字按钮");
+                    else
+                        ImGui.SetTooltip(cardsOpen ? "点击关闭名片窗口" : "点击打开名片窗口");
+                }
+            }
+            finally
+            {
+                ImGui.PopStyleColor(3);
+            }
+
+            var inCombatNow = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
+            var altHeld = ImGui.GetIO().KeyAlt;
+            var dragAllowed = !inCombatNow && (config.CardsPlacementMode || altHeld);
+            if (!dragAllowed)
+                draggingLauncher = false;
+            else if (ImGui.IsWindowHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                draggingLauncher = true;
+
+            if (draggingLauncher)
+            {
+                if (dragAllowed && ImGui.IsMouseDown(ImGuiMouseButton.Right))
+                {
+                    ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
+                }
+                else
+                {
+                    draggingLauncher = false;
+                    config.LauncherWindowPos = ImGui.GetWindowPos();
+                    config.HasLauncherWindowPos = true;
+                    config.Save();
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            ResetImageCache();
+        }
+    }
+
     public class SummaryWindow : Window, IDisposable
     {
         private bool positionedFromConfig;
@@ -500,6 +737,7 @@ internal class PluginUI : IDisposable
             if (!view.HasBattle && !view.IsPreview)
             {
                 Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
+                        ImGuiWindowFlags.NoBringToFrontOnFocus |
                         ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
                         ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoBackground |
                         ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoMouseInputs | ImGuiWindowFlags.NoMove;
@@ -515,6 +753,7 @@ internal class PluginUI : IDisposable
             }
 
             Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
+                    ImGuiWindowFlags.NoBringToFrontOnFocus |
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
                     ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoMove;
             BgAlpha = config.SummaryBackgroundAlpha;
@@ -694,6 +933,7 @@ internal class PluginUI : IDisposable
             }
 
             Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
+                    ImGuiWindowFlags.NoBringToFrontOnFocus |
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
                     ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoMove |
                     (clickThroughActive ? (ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoMouseInputs) : ImGuiWindowFlags.None);
