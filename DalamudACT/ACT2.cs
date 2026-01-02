@@ -156,9 +156,10 @@ namespace DalamudACT
                 DalamudApi.Log.Verbose($"Dot:{arg0} from {arg2:X} ticked {arg1} damage on {entityId:X}");
                 lock (SyncRoot)
                 {
+                    Battles[^1].AddDotTick(arg2, arg1);
                     if (arg0 != 0 && Potency.BuffToAction.TryGetValue(arg0, out arg0))
                     {
-                        Battles[^1].AddEvent(EventKind.Damage, arg2, entityId, arg0, arg1);
+                        Battles[^1].AddEvent(EventKind.Damage, arg2, entityId, arg0, arg1, countHit: false);
                     }
                     else
                     {

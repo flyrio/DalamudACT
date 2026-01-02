@@ -1359,6 +1359,10 @@ internal class PluginUI : IDisposable
                         if (hoveredData.Damages.TryGetValue(0, out var totalDamage))
                             baseTotalDamage = totalDamage.Damage;
 
+                        long dotTickDamage = 0;
+                        if (battle.DotDamageByActor.TryGetValue(hoveredActor, out var dotDamage))
+                            dotTickDamage = dotDamage;
+
                         long dotSimDamage = 0;
                         if (canSimDots && battle.DotDmgList.Count > 0)
                         {
@@ -1368,6 +1372,29 @@ internal class PluginUI : IDisposable
                                     dotSimDamage += (long)dotDmg;
                             }
                         }
+                        long dotFallbackDamage = 0;
+                        if (dotTickDamage == 0 && dotSimDamage == 0)
+                        {
+                            foreach (var (skillId, skillDamage) in hoveredData.Damages)
+                            {
+                                if (skillId == 0 || skillDamage.Damage <= 0)
+                                {
+                                    continue;
+                                }
+
+                                if (Potency.BuffToAction.ContainsValue(skillId))
+                                {
+                                    dotFallbackDamage += skillDamage.Damage;
+                                }
+                            }
+                        }
+
+                        var dotTotal = dotTickDamage + dotSimDamage;
+                        var dotIsFallback = dotTotal == 0 && dotFallbackDamage > 0;
+                        if (dotIsFallback)
+                        {
+                            dotTotal = dotFallbackDamage;
+                        }
 
                         ImGui.BeginTooltip();
                         try
@@ -1376,8 +1403,16 @@ internal class PluginUI : IDisposable
                             ImGui.TextColored(SecondaryTextColor, statsText);
                             ImGui.Separator();
                             ImGui.TextColored(SecondaryTextColor, $"秒伤 {dps:F1}  伤害 {row.Damage:N0}");
+                            if (dotTotal > 0)
+                            {
+                                var dotLabel = dotIsFallback ? "DOT伤害(估算)" : "DOT伤害";
+                                var dotText = dotSimDamage > 0 && !dotIsFallback
+                                    ? $"{dotLabel} {dotTotal:N0}（补正 {dotSimDamage:N0}）"
+                                    : $"{dotLabel} {dotTotal:N0}";
+                                ImGui.TextColored(SecondaryTextColor, dotText);
+                            }
                             if (dotSimDamage > 0)
-                                ImGui.TextColored(SecondaryTextColor, $"DOT补正 {dotSimDamage:N0}  技能合计 {baseTotalDamage:N0}");
+                                ImGui.TextColored(SecondaryTextColor, $"技能合计 {baseTotalDamage:N0}");
 
                             if (hoveredData.MaxDamage > 0)
                             {

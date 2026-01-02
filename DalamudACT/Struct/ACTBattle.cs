@@ -24,6 +24,7 @@ public class ACTBattle
     public readonly Dictionary<uint, string> Name = new();
     public readonly Dictionary<uint, Data> DataDic = new();
     public readonly Dictionary<long, long> PlayerDotPotency = new();
+    public readonly Dictionary<uint, long> DotDamageByActor = new();
 
     public readonly List<Dot> ActiveDots = new();
     public long TotalDotDamage;
@@ -143,7 +144,7 @@ public class ACTBattle
         Death = 6,
     }
 
-    public void AddEvent(EventKind eventKind, uint from, uint target, uint id, long damage, byte dc = 0)
+    public void AddEvent(EventKind eventKind, uint from, uint target, uint id, long damage, byte dc = 0, bool countHit = true)
     {
         if ((DalamudApi.ObjectTable.LocalPlayer?.StatusFlags & StatusFlags.InCombat) == 0) return;
 
@@ -234,9 +235,15 @@ public class ACTBattle
                     DataDic[from].MaxDamageSkill = id;
                 }
 
-                DataDic[from].Damages[id].AddDC(dc);
+                if (countHit)
+                {
+                    DataDic[from].Damages[id].AddDC(dc);
+                }
                 DataDic[from].Damages[Total].AddDamage(damage);
-                DataDic[from].Damages[Total].AddDC(dc);
+                if (countHit)
+                {
+                    DataDic[from].Damages[Total].AddDC(dc);
+                }
             }
         }
     }
@@ -253,7 +260,15 @@ public class ACTBattle
         if (!DataDic.ContainsKey(from)) return;
 
         DataDic[from].Damages[Total].AddDamage(damage);
-        DataDic[from].Damages[Total].AddDC(dc);
+    }
+
+    public void AddDotTick(uint from, long damage)
+    {
+        if (from > 0x40000000 || from == 0x0) return;
+        if (DotDamageByActor.ContainsKey(from))
+            DotDamageByActor[from] += damage;
+        else
+            DotDamageByActor.Add(from, damage);
     }
 
     private void CalcDot()
