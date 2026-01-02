@@ -333,3 +333,8 @@ ASALocalRun/
 # Local History for Visual Studio
 .localhistory/
 DalamudACT/DalamudPackager.targets
+
+# Potency updater artifacts
+
+tmp/
+DalamudACT/Potency.update.warnings.txt
