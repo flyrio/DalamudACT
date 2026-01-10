@@ -1,4 +1,5 @@
-﻿using System;
+// ACT 插件入口与事件 Hook，负责战斗事件采集与统计更新。
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Dalamud.Game.ClientState.Conditions;
@@ -31,6 +32,7 @@ namespace DalamudACT
         public List<ACTBattle> Battles = new(5);
         private ExcelSheet<TerritoryType> terrySheet;
         internal IFontHandle? CardsFontHandle;
+        internal IFontHandle? SummaryFontHandle;
         private bool wasInCombat;
 
         private delegate void ReceiveAbilityDelegate(int sourceId, nint sourceCharacter, nint pos,
@@ -66,9 +68,11 @@ namespace DalamudACT
         {
             DalamudApi.Log.Verbose($"-----------------------Ability{length}:{sourceId:X}------------------------------");
 
-            if (sourceId > 0x40000000)
-                sourceId = ACTBattle.GetOwner(sourceId);
+            var originalSourceId = sourceId;
+            if (sourceId > 0x40000000 && sourceId != 0xE0000000)
+                sourceId = ACTBattle.ResolveOwner(sourceId);
 
+            if (sourceId == 0xE0000000 && originalSourceId != 0xE0000000) return;
             if (sourceId is > 0x40000000 or 0x0) return;
 
             var header = Marshal.PtrToStructure<Header>(headPtr);
@@ -147,24 +151,39 @@ namespace DalamudACT
                 return;
             }
 
-            if (entityId < 0x40000000) return;
-            if (arg2 > 0x40000000) arg2 = ACTBattle.GetOwner(arg2);
-            if (arg2 > 0x40000000) return;
+            var dotTarget = entityId;
+            if (dotTarget < 0x40000000 && targetId > 0 && targetId <= uint.MaxValue)
+                dotTarget = (uint)targetId;
+            if (dotTarget < 0x40000000) return;
+
+            var sourceId = arg2;
+            if (sourceId > 0x40000000 && sourceId != 0xE0000000)
+                sourceId = ACTBattle.ResolveOwner(sourceId);
 
             if (type is (uint)ActorControlCategory.DoT)
             {
-                DalamudApi.Log.Verbose($"Dot:{arg0} from {arg2:X} ticked {arg1} damage on {entityId:X}");
                 lock (SyncRoot)
                 {
-                    Battles[^1].AddDotTick(arg2, arg1);
+                    if ((sourceId == 0 || sourceId > 0x40000000) && arg0 != 0 &&
+                        Battles[^1].TryResolveDotSource(dotTarget, arg0, out var resolvedSource))
+                        sourceId = resolvedSource;
+
+                    DalamudApi.Log.Verbose($"Dot:{arg0} from {sourceId:X} ticked {arg1} damage on {dotTarget:X}");
+                    if (sourceId == 0 || sourceId > 0x40000000)
+                    {
+                        Battles[^1].AddEvent(EventKind.Damage, 0xE0000000, dotTarget, 0, arg1, countHit: false);
+                        return;
+                    }
+
+                    Battles[^1].AddDotTick(sourceId, arg1);
                     if (arg0 != 0 && Potency.BuffToAction.TryGetValue(arg0, out arg0))
                     {
-                        Battles[^1].AddEvent(EventKind.Damage, arg2, entityId, arg0, arg1, countHit: false);
+                        Battles[^1].AddEvent(EventKind.Damage, sourceId, dotTarget, arg0, arg1, countHit: false);
                     }
                     else
                     {
                         // Prefer attributing the tick to the reported source (and avoid id=0 double-counting in AddEvent).
-                        Battles[^1].AddDotDamage(arg2, arg1);
+                        Battles[^1].AddDotDamage(sourceId, arg1);
                     }
                 }
             }
@@ -209,6 +228,7 @@ namespace DalamudACT
                 {
                     Battles[^1].EndTime = now;
                     Battles[^1].ActiveDots.Clear();
+                    ACTBattle.ClearOwnerCache();
                     if (Battles.Count == 5)
                     {
                         Battles.RemoveAt(0);
@@ -281,6 +301,7 @@ namespace DalamudACT
                 ((Dalamud.Interface.UiBuilder)DalamudApi.PluginInterface.UiBuilder).RunWhenUiPrepared<int>(() =>
                 {
                     RefreshCardsFont();
+                    RefreshSummaryFont();
                     return 0;
                 });
             }
@@ -346,6 +367,28 @@ namespace DalamudACT
                 atlas.BuildFontsOnNextFrame();
         }
 
+        internal void RefreshSummaryFont()
+        {
+            var uiBuilder = (Dalamud.Interface.UiBuilder)DalamudApi.PluginInterface.UiBuilder;
+            var atlas = uiBuilder.FontAtlas;
+
+            SummaryFontHandle?.Dispose();
+            SummaryFontHandle = null;
+
+            var scale = Math.Clamp(Configuration.SummaryScale, 0.5f, 2.0f);
+            if (Math.Abs(scale - 1f) >= 0.01f)
+            {
+                var style = new GameFontStyle(GameFontFamily.Axis, Dalamud.Interface.UiBuilder.DefaultFontSizePt * scale);
+                SummaryFontHandle = atlas.NewGameFontHandle(style);
+            }
+
+            // In newer Dalamud, BuildFontsOnNextFrame is not allowed when AutoRebuildMode is Async.
+            if (string.Equals(atlas.AutoRebuildMode.ToString(), "Async", StringComparison.OrdinalIgnoreCase))
+                _ = atlas.BuildFontsAsync();
+            else
+                atlas.BuildFontsOnNextFrame();
+        }
+
         public void Disable()
         {
             ActorControlSelfHook.Disable();
@@ -357,6 +400,7 @@ namespace DalamudACT
         {
             DalamudApi.Framework.Update -= Update;
             CardsFontHandle?.Dispose();
+            SummaryFontHandle?.Dispose();
             PluginUi?.Dispose();
             foreach (var (id, texture) in Icon) texture?.Dispose();
             Disable();

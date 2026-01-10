@@ -1,3 +1,4 @@
+// UI 展示与交互逻辑，负责战斗统计可视化。
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -194,7 +195,7 @@ internal class PluginUI : IDisposable
                 nameByActor = new Dictionary<uint, string>(selectedBattle.Name);
 
                 Dictionary<uint, float>? dotByActor = null;
-                if (canSimDots)
+                if (canSimDots && selectedBattle.TotalDotDamage > 0)
                 {
                     dotByActor = new Dictionary<uint, float>();
                     foreach (var (active, dotDmg) in selectedBattle.DotDmgList)
@@ -346,6 +347,22 @@ internal class PluginUI : IDisposable
                     ImGui.TextDisabled("提示：开启穿透后名片不会响应鼠标操作（悬停详情仍会显示），按住 Alt 可临时拖动名片窗口。");
                     changed |= ImGui.SliderFloat("名片背景透明度", ref config.CardsBackgroundAlpha, 0f, 1f);
                     changed |= ImGui.SliderFloat("团队信息窗背景透明度", ref config.SummaryBackgroundAlpha, 0f, 1f);
+                    changed |= ImGui.SliderFloat("团队信息窗字体缩放", ref config.SummaryScale, 0.5f, 2.0f);
+                    if (ImGui.IsItemDeactivatedAfterEdit())
+                        _plugin.RefreshSummaryFont();
+
+                    changed |= ImGui.Checkbox("自定义团队信息窗背景颜色", ref config.SummaryUseCustomBackgroundColor);
+                    if (config.SummaryUseCustomBackgroundColor)
+                    {
+                        var bgColor = new Vector3(config.SummaryBackgroundColor.X, config.SummaryBackgroundColor.Y, config.SummaryBackgroundColor.Z);
+                        if (ImGui.ColorEdit3("团队信息窗背景颜色", ref bgColor))
+                        {
+                            config.SummaryBackgroundColor = new Vector4(bgColor, 1f);
+                            changed = true;
+                        }
+                    }
+
+                    ImGui.TextDisabled("提示：团队信息窗可按住 Alt + 左键 拖动；摆放模式下右键可拖动名片/团队信息窗，松开会保存位置。");
                 }
 
                 if (ImGui.CollapsingHeader("显示", ImGuiTreeNodeFlags.DefaultOpen))
@@ -735,7 +752,7 @@ internal class PluginUI : IDisposable
     public class SummaryWindow : Window, IDisposable
     {
         private bool positionedFromConfig;
-        private bool draggingSummary;
+        private ImGuiMouseButton? draggingSummaryButton;
 
         public SummaryWindow(ACT plugin) : base("伤害统计 - 团队信息", ImGuiWindowFlags.AlwaysAutoResize, false)
         {
@@ -760,17 +777,17 @@ internal class PluginUI : IDisposable
             var view = GetBattleView(inCombatNow, localPlayerId);
 
             // Avoid showing an empty black box when there is no battle record.
-            if (!view.HasBattle && !view.IsPreview)
-            {
-                Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
-                        ImGuiWindowFlags.NoBringToFrontOnFocus |
-                        ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
-                        ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoBackground |
-                        ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoMouseInputs | ImGuiWindowFlags.NoMove;
-                BgAlpha = 0f;
-                draggingSummary = false;
-                return;
-            }
+             if (!view.HasBattle && !view.IsPreview)
+             {
+                 Flags = ImGuiWindowFlags.NoNavFocus | ImGuiWindowFlags.NoFocusOnAppearing |
+                         ImGuiWindowFlags.NoBringToFrontOnFocus |
+                         ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
+                         ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoBackground |
+                         ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoMouseInputs | ImGuiWindowFlags.NoMove;
+                 BgAlpha = 0f;
+                 draggingSummaryButton = null;
+                 return;
+             }
 
             if (!positionedFromConfig && config.HasSummaryWindowPos)
             {
@@ -782,7 +799,33 @@ internal class PluginUI : IDisposable
                     ImGuiWindowFlags.NoBringToFrontOnFocus |
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse |
                     ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoMove;
-            BgAlpha = config.SummaryBackgroundAlpha;
+
+            var pushedFont = false;
+
+            var useCustomBackgroundColor = config.SummaryUseCustomBackgroundColor;
+            if (useCustomBackgroundColor)
+            {
+                Flags |= ImGuiWindowFlags.NoBackground;
+                BgAlpha = 0f;
+
+                var drawList = ImGui.GetWindowDrawList();
+                var winPos = ImGui.GetWindowPos();
+                var winSize = ImGui.GetWindowSize();
+                var rounding = ImGui.GetStyle().WindowRounding;
+                var bgColor = config.SummaryBackgroundColor;
+                bgColor.W = config.SummaryBackgroundAlpha;
+                drawList.AddRectFilled(winPos, winPos + winSize, ImGui.GetColorU32(bgColor), rounding);
+            }
+            else
+            {
+                BgAlpha = config.SummaryBackgroundAlpha;
+            }
+
+            if (_plugin.SummaryFontHandle != null && _plugin.SummaryFontHandle.Available)
+            {
+                _plugin.SummaryFontHandle.Push();
+                pushedFont = true;
+            }
 
             var clearRequested = false;
 
@@ -817,6 +860,8 @@ internal class PluginUI : IDisposable
             if (clearRequested)
             {
                 instance?.cardsWindow.ClearBattleHistory();
+                if (pushedFont)
+                    _plugin.SummaryFontHandle!.Pop();
                 return;
             }
 
@@ -847,24 +892,34 @@ internal class PluginUI : IDisposable
             var altHeld = ImGui.GetIO().KeyAlt;
             var dragAllowed = !inCombatNow && (config.CardsPlacementMode || altHeld);
             if (!dragAllowed)
-                draggingSummary = false;
-            else if (ImGui.IsWindowHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
-                draggingSummary = true;
-
-            if (draggingSummary)
+                draggingSummaryButton = null;
+            else if (draggingSummaryButton == null && ImGui.IsWindowHovered())
             {
-                if (dragAllowed && ImGui.IsMouseDown(ImGuiMouseButton.Right))
+                // CardsPlacementMode: right-drag; Alt: left-drag.
+                if (config.CardsPlacementMode && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                    draggingSummaryButton = ImGuiMouseButton.Right;
+                else if (altHeld && ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !ImGui.IsAnyItemActive())
+                    draggingSummaryButton = ImGuiMouseButton.Left;
+            }
+
+            if (draggingSummaryButton != null)
+            {
+                var button = draggingSummaryButton.Value;
+                if (dragAllowed && ImGui.IsMouseDown(button))
                 {
                     ImGui.SetWindowPos(ImGui.GetWindowPos() + ImGui.GetIO().MouseDelta);
                 }
                 else
                 {
-                    draggingSummary = false;
+                    draggingSummaryButton = null;
                     config.SummaryWindowPos = ImGui.GetWindowPos();
                     config.HasSummaryWindowPos = true;
                     config.Save();
                 }
             }
+
+            if (pushedFont)
+                _plugin.SummaryFontHandle!.Pop();
         }
 
         public void Dispose()
@@ -1006,7 +1061,7 @@ internal class PluginUI : IDisposable
                     nameByActor = new Dictionary<uint, string>(battle.Name);
 
                     Dictionary<uint, float>? dotByActor = null;
-                    if (canSimDots)
+                    if (canSimDots && battle.TotalDotDamage > 0)
                     {
                         dotByActor = new Dictionary<uint, float>();
                         foreach (var (active, dotDmg) in battle.DotDmgList)
@@ -1053,7 +1108,7 @@ internal class PluginUI : IDisposable
                     nameByActor = new Dictionary<uint, string>(battle.Name);
 
                     Dictionary<uint, float>? dotByActor = null;
-                    if (canSimDots)
+                    if (canSimDots && battle.TotalDotDamage > 0)
                     {
                         dotByActor = new Dictionary<uint, float>();
                         foreach (var (active, dotDmg) in battle.DotDmgList)
@@ -1403,14 +1458,22 @@ internal class PluginUI : IDisposable
                             ImGui.TextColored(SecondaryTextColor, statsText);
                             ImGui.Separator();
                             ImGui.TextColored(SecondaryTextColor, $"秒伤 {dps:F1}  伤害 {row.Damage:N0}");
-                            if (dotTotal > 0)
-                            {
-                                var dotLabel = dotIsFallback ? "DOT伤害(估算)" : "DOT伤害";
-                                var dotText = dotSimDamage > 0 && !dotIsFallback
-                                    ? $"{dotLabel} {dotTotal:N0}（补正 {dotSimDamage:N0}）"
-                                    : $"{dotLabel} {dotTotal:N0}";
-                                ImGui.TextColored(SecondaryTextColor, dotText);
-                            }
+                        if (dotTotal > 0)
+                        {
+                            var dotLabel = dotIsFallback ? "DOT伤害(估算)" : "DOT伤害";
+                            var dotText = dotSimDamage > 0 && !dotIsFallback
+                                ? $"{dotLabel} {dotTotal:N0}（补正 {dotSimDamage:N0}）"
+                                : $"{dotLabel} {dotTotal:N0}";
+                            ImGui.TextColored(SecondaryTextColor, dotText);
+                            var dotSourceText = dotIsFallback
+                                ? "来源: 技能估算"
+                                : dotSimDamage > 0 && dotTickDamage > 0
+                                    ? "来源: Tick+模拟"
+                                    : dotSimDamage > 0
+                                        ? "来源: 模拟"
+                                        : "来源: Tick";
+                            ImGui.TextColored(SecondaryTextColor, dotSourceText);
+                        }
                             if (dotSimDamage > 0)
                                 ImGui.TextColored(SecondaryTextColor, $"技能合计 {baseTotalDamage:N0}");
 

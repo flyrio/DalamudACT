@@ -14,6 +14,8 @@ public class ACTBattle
 
 
     public static ExcelSheet<Action>? ActionSheet;
+    private static readonly Dictionary<uint, uint> OwnerCache = new();
+    private static readonly object OwnerCacheLock = new();
     //public static readonly Dictionary<uint, uint> Pet = new();
     public readonly Dictionary<uint, long> LimitBreak = new();
 
@@ -181,7 +183,7 @@ public class ACTBattle
             TotalDotDamage += damage;
             foreach (var dot in ActiveDots)
             {
-                if (dot.Source > 0x40000000) dot.Source = GetOwner(dot.Source);
+                if (dot.Source > 0x40000000) dot.Source = ResolveOwner(dot.Source);
                 if (dot.Source > 0x40000000) continue;
                 if (!DataDic.ContainsKey(dot.Source)) AddPlayer(dot.Source);
                 if (!DataDic.ContainsKey(dot.Source)) continue;
@@ -282,6 +284,12 @@ public class ACTBattle
             if (!DotDmgList.TryAdd(active,dmg)) DotDmgList[active] = dmg;
         }
 
+        if (TotalDotSim <= 0)
+        {
+            DotDmgList.Clear();
+            return;
+        }
+
         foreach (var (active,damage) in DotDmgList)
         {
             DotDmgList[active]  = damage / TotalDotSim * TotalDotDamage;
@@ -317,11 +325,11 @@ public class ACTBattle
         var npc = (IBattleNpc) target;
         foreach (var status in npc.StatusList)
         {
-            DalamudApi.Log.Verbose($"Check Dot on {id:X}:{status.StatusId}:{status.SourceId}-{GetOwner(status.SourceId)}");
+            DalamudApi.Log.Verbose($"Check Dot on {id:X}:{status.StatusId}:{status.SourceId}-{ResolveOwner(status.SourceId)}");
             if (DotPot().ContainsKey(status.StatusId))
             {
                 var source = status.SourceId;
-                if (status.SourceId > 0x40000000) source = GetOwner(source);
+                if (status.SourceId > 0x40000000) source = ResolveOwner(source);
                 if (source > 0x40000000) continue;
                 ActiveDots.Add(new Dot()
                     {BuffId = status.StatusId, Source = source});
@@ -349,6 +357,57 @@ public class ACTBattle
     //}
 
     public static uint GetOwner(uint id) => DalamudApi.ObjectTable.SearchByEntityId(id)?.OwnerId ?? 0xE000_0000;
+
+    public static void ClearOwnerCache()
+    {
+        lock (OwnerCacheLock)
+        {
+            OwnerCache.Clear();
+        }
+    }
+
+    public static uint ResolveOwner(uint id)
+    {
+        if (id == 0 || id == 0xE0000000) return id;
+        if (id <= 0x40000000) return id;
+        lock (OwnerCacheLock)
+        {
+            if (OwnerCache.TryGetValue(id, out var cached) && cached is > 0 and <= 0x40000000) return cached;
+        }
+
+        var owner = GetOwner(id);
+        if (owner is > 0 and <= 0x40000000)
+        {
+            lock (OwnerCacheLock)
+            {
+                OwnerCache[id] = owner;
+            }
+        }
+        return owner;
+    }
+
+    public bool TryResolveDotSource(uint targetId, uint buffId, out uint source)
+    {
+        source = 0;
+        if (buffId == 0) return false;
+
+        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
+
+        uint matchedSource = 0;
+        foreach (var status in ((IBattleNpc)target).StatusList)
+        {
+            if (status.StatusId != buffId) continue;
+            var resolved = ResolveOwner(status.SourceId);
+            if (resolved is 0 or > 0x40000000) continue;
+            if (matchedSource != 0 && matchedSource != resolved) return false;
+            matchedSource = resolved;
+        }
+
+        if (matchedSource == 0) return false;
+        source = matchedSource;
+        return true;
+    }
 
     private Dictionary<uint, uint> DotPot()
     {
