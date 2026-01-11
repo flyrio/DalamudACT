@@ -8,7 +8,7 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 13;
+        private const int CurrentVersion = 14;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
@@ -46,6 +46,9 @@ namespace DalamudACT
         public float CardRowSpacing = 6f;
         public int SortMode = 0; // 0=秒伤 1=总伤害 2=姓名
         public int TopN = 0; // 0=全部
+
+        // 0=ENCDPS(按战斗时长) 1=DPS(按个人活跃时长)
+        public int DpsTimeMode = 1;
 
         // the below exist just to make saving less cumbersome
 
@@ -137,6 +140,11 @@ namespace DalamudACT
                     SummaryBackgroundColor = new Vector4(0.12f, 0.12f, 0.12f, 1f);
                 }
 
+                if (Version < 14)
+                {
+                    DpsTimeMode = 1;
+                }
+
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列
                 if (Version <= 1)
                 {
@@ -148,6 +156,12 @@ namespace DalamudACT
                 Version = CurrentVersion;
                 Save();
                 changed = false;
+            }
+
+            if (DpsTimeMode is < 0 or > 1)
+            {
+                DpsTimeMode = 1;
+                changed = true;
             }
 
             if (changed) Save();

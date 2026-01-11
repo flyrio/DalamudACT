@@ -368,6 +368,15 @@ internal class PluginUI : IDisposable
                 if (ImGui.CollapsingHeader("显示", ImGuiTreeNodeFlags.DefaultOpen))
                 {
                     changed |= ImGui.Checkbox("隐藏玩家姓名（用职业名代替）", ref config.HideName);
+
+                    var dpsModes = new[] { "ENCDPS（按战斗时长）", "DPS（按个人活跃时长）" };
+                    var dpsTimeMode = config.DpsTimeMode;
+                    if (ImGui.Combo("DPS 口径", ref dpsTimeMode, dpsModes, dpsModes.Length))
+                    {
+                        config.DpsTimeMode = dpsTimeMode;
+                        changed = true;
+                    }
+                    ImGui.TextDisabled("提示：ACT 的 DPS=个人活跃时长；ENCDPS=战斗时长。");
                     changed |= ImGui.SliderInt("仅显示前 N 名（0=全部）", ref config.TopN, 0, 24);
                     changed |= ImGui.Checkbox("显示直击/暴击/直爆列", ref config.ShowRates);
                     changed |= ImGui.Checkbox("高亮自己", ref config.HighlightSelf);
@@ -872,8 +881,6 @@ internal class PluginUI : IDisposable
                 var totalDamageAll = actorDamageTotal;
                 if (view.TotalDotDamage != 0 && !view.CanSimDots)
                     totalDamageAll += view.TotalDotDamage;
-                if (view.LimitDamage > 0)
-                    totalDamageAll += view.LimitDamage;
 
                 var totalDps = view.Seconds <= 0 ? 0 : (float)totalDamageAll / view.Seconds;
                 var limitDps = view.Seconds <= 0 ? 0 : (float)view.LimitDamage / view.Seconds;
@@ -1179,6 +1186,15 @@ internal class PluginUI : IDisposable
                 pushedFont = true;
             }
 
+            float GetDpsSeconds(uint actor)
+                => config.DpsTimeMode == 1 && battle != null ? battle.ActorDuration(actor) : seconds;
+
+            float GetDps(long damage, uint actor)
+            {
+                var denom = GetDpsSeconds(actor);
+                return denom <= 0 ? 0f : (float)damage / denom;
+            }
+
             rows.Sort((a, b) =>
             {
                 return config.SortMode switch
@@ -1187,7 +1203,7 @@ internal class PluginUI : IDisposable
                         nameByActor.GetValueOrDefault(a.Actor, JobNameCn(a.JobId)),
                         nameByActor.GetValueOrDefault(b.Actor, JobNameCn(b.JobId))),
                     1 => b.Damage.CompareTo(a.Damage),
-                    _ => ((float)b.Damage / seconds).CompareTo((float)a.Damage / seconds),
+                    _ => GetDps(b.Damage, b.Actor).CompareTo(GetDps(a.Damage, a.Actor)),
                 };
             });
 
@@ -1210,7 +1226,7 @@ internal class PluginUI : IDisposable
                 }
             }
 
-            var maxDps = rows.Count == 0 ? 0 : rows.Max(r => (float)r.Damage / seconds);
+            var maxDps = rows.Count == 0 ? 0 : rows.Max(r => GetDps(r.Damage, r.Actor));
             var lineHeight = ImGui.GetTextLineHeight();
 
             var baseCardWidth = Math.Clamp(config.DisplayLayout == 0 ? config.CardColumnWidth : config.CardRowWidth, 160f, 800f);
@@ -1250,7 +1266,7 @@ internal class PluginUI : IDisposable
                         : nameByActor.GetValueOrDefault(r.Actor, JobNameCn(r.JobId));
                     var nameText = $"{rank}. {displayName}";
 
-                    var dps = seconds <= 0 ? 0 : (float)r.Damage / seconds;
+                    var dps = GetDps(r.Damage, r.Actor);
                     var dpsText = $"{dps:F1}";
                     var deathText = $"死 {r.Death:D}";
                     var barStatsText = config.ShowRates
@@ -1404,7 +1420,7 @@ internal class PluginUI : IDisposable
                         var displayName = config.HideName
                             ? JobNameCn(row.JobId)
                             : nameByActor.GetValueOrDefault(hoveredActor, JobNameCn(row.JobId));
-                        var dps = seconds <= 0 ? 0 : (float)row.Damage / seconds;
+                        var dps = GetDps(row.Damage, row.Actor);
 
                         var statsText = config.ShowRates
                             ? $"直 {FormatRate(row.D)} 爆 {FormatRate(row.C)} 直暴 {FormatRate(row.DC)} 死 {row.Death:D}"
@@ -1502,7 +1518,7 @@ internal class PluginUI : IDisposable
                                     if (ACTBattle.ActionSheet != null && ACTBattle.ActionSheet.TryGetRow(skill.Id, out var action))
                                         name = action.Name.ExtractText();
                                     var pct = row.Damage <= 0 ? 0 : (float)skill.Damage / row.Damage;
-                                    var skillDps = seconds <= 0 ? 0 : (float)skill.Damage / seconds;
+                                    var skillDps = GetDps(skill.Damage, row.Actor);
 
                                     var icon = GetActionIcon(skill.Id);
                                     var iconSize = lineHeight * 1.2f;

@@ -78,6 +78,7 @@ namespace DalamudACT
             var header = Marshal.PtrToStructure<Header>(headPtr);
             var effect = (EffectEntry*)effectPtr;
             var target = (ulong*)targetPtr;
+            var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             lock (SyncRoot)
             {
@@ -99,7 +100,7 @@ namespace DalamudACT
                             var critDh = (byte)(effect->param1 & 0x60);
 
                             DalamudApi.Log.Verbose($"EffectEntry:{effect->type},{sourceId:X}:{targetId:X}:{header.actionId},{damage}");
-                            Battles[^1].AddEvent(EventKind.Damage, sourceId, targetId, header.actionId, damage, critDh);
+                            Battles[^1].AddEvent(EventKind.Damage, sourceId, targetId, header.actionId, damage, critDh, eventTimeMs: eventTimeMs);
                         }
 
                         effect++;
@@ -145,8 +146,9 @@ namespace DalamudACT
 
             if (type == (uint)ActorControlCategory.Death && entityId < 0x40000000)
             {
+                var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 lock (SyncRoot)
-                    Battles[^1].AddEvent(EventKind.Death, entityId, arg0, 0, 0);
+                    Battles[^1].AddEvent(EventKind.Death, entityId, arg0, 0, 0, eventTimeMs: eventTimeMs);
                 DalamudApi.Log.Verbose($"{entityId:X} killed by {arg0:X}");
                 return;
             }
@@ -162,28 +164,32 @@ namespace DalamudACT
 
             if (type is (uint)ActorControlCategory.DoT)
             {
+                var dotBuffId = arg0;
+                var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 lock (SyncRoot)
                 {
-                    if ((sourceId == 0 || sourceId > 0x40000000) && arg0 != 0 &&
-                        Battles[^1].TryResolveDotSource(dotTarget, arg0, out var resolvedSource))
+                    if ((sourceId == 0 || sourceId > 0x40000000) && dotBuffId != 0 &&
+                        !Battles[^1].TryGetCachedDotSource(dotTarget, dotBuffId, out sourceId) &&
+                        Battles[^1].TryResolveDotSource(dotTarget, dotBuffId, out var resolvedSource))
                         sourceId = resolvedSource;
 
-                    DalamudApi.Log.Verbose($"Dot:{arg0} from {sourceId:X} ticked {arg1} damage on {dotTarget:X}");
+                    DalamudApi.Log.Verbose($"Dot:{dotBuffId} from {sourceId:X} ticked {arg1} damage on {dotTarget:X}");
                     if (sourceId == 0 || sourceId > 0x40000000)
                     {
-                        Battles[^1].AddEvent(EventKind.Damage, 0xE0000000, dotTarget, 0, arg1, countHit: false);
+                        Battles[^1].AddEvent(EventKind.Damage, 0xE0000000, dotTarget, dotBuffId, arg1, countHit: false, eventTimeMs: eventTimeMs);
                         return;
                     }
 
+                    Battles[^1].RememberDotSource(dotTarget, dotBuffId, sourceId);
                     Battles[^1].AddDotTick(sourceId, arg1);
-                    if (arg0 != 0 && Potency.BuffToAction.TryGetValue(arg0, out arg0))
+                    if (dotBuffId != 0 && Potency.BuffToAction.TryGetValue(dotBuffId, out var actionId))
                     {
-                        Battles[^1].AddEvent(EventKind.Damage, sourceId, dotTarget, arg0, arg1, countHit: false);
+                        Battles[^1].AddEvent(EventKind.Damage, sourceId, dotTarget, actionId, arg1, countHit: false, eventTimeMs: eventTimeMs);
                     }
                     else
                     {
                         // Prefer attributing the tick to the reported source (and avoid id=0 double-counting in AddEvent).
-                        Battles[^1].AddDotDamage(sourceId, arg1);
+                        Battles[^1].AddDotDamage(sourceId, arg1, eventTimeMs: eventTimeMs);
                     }
                 }
             }
@@ -193,24 +199,8 @@ namespace DalamudACT
             IntPtr effectArray, IntPtr effectTrail)
         {
             var targetCount = *(byte*)(effectHeader + 0x21);
-            switch (targetCount)
-            {
-                case <= 1:
-                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 1);
-                    break;
-                case <= 8 and > 1:
-                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 8);
-                    break;
-                case > 8 and <= 16:
-                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 16);
-                    break;
-                case > 16 and <= 24:
-                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 24);
-                    break;
-                case > 24 and <= 32:
-                    Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, 32);
-                    break;
-            }
+            if (targetCount > 0)
+                Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, targetCount);
 
             ReceiveAbilityHook.Original(sourceId, sourceCharacter, pos, effectHeader, effectArray, effectTrail);
         }
@@ -220,14 +210,21 @@ namespace DalamudACT
         private void CheckTime()
         {
             var inCombat = DalamudApi.Conditions.Any(ConditionFlag.InCombat);
-            var now = DateTimeOffset.Now.ToUnixTimeSeconds();
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             lock (SyncRoot)
             {
                 // Combat ended: freeze the last battle and keep it for browsing.
                 if (wasInCombat && !inCombat)
                 {
-                    Battles[^1].EndTime = now;
-                    Battles[^1].ActiveDots.Clear();
+                    var battle = Battles[^1];
+                    if (battle.LastEventTime > 0)
+                        battle.EndTime = battle.LastEventTime;
+                    else if (battle.StartTime > 0)
+                        battle.EndTime = battle.StartTime;
+                    else
+                        battle.EndTime = 0;
+
+                    battle.ActiveDots.Clear();
                     ACTBattle.ClearOwnerCache();
                     if (Battles.Count == 5)
                     {
@@ -239,9 +236,10 @@ namespace DalamudACT
 
                 if (DalamudApi.ObjectTable.LocalPlayer != null && inCombat)
                 {
-                    if (Battles[^1].StartTime is 0) Battles[^1].StartTime = now;
-                    Battles[^1].EndTime = now;
-                    Battles[^1].Zone = GetPlaceName();
+                    var battle = Battles[^1];
+                    if (battle.StartTime != 0)
+                        battle.EndTime = now;
+                    battle.Zone = GetPlaceName();
                 }
 
                 wasInCombat = inCombat;

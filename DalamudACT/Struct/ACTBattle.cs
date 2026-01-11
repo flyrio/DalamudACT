@@ -1,5 +1,7 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Interface.Textures;
@@ -21,12 +23,14 @@ public class ACTBattle
 
     public long StartTime;
     public long EndTime;
+    public long LastEventTime;
     public string? Zone;
     public int? Level;
     public readonly Dictionary<uint, string> Name = new();
     public readonly Dictionary<uint, Data> DataDic = new();
     public readonly Dictionary<long, long> PlayerDotPotency = new();
     public readonly Dictionary<uint, long> DotDamageByActor = new();
+    public readonly Dictionary<ulong, uint> DotSourceCache = new();
 
     public readonly List<Dot> ActiveDots = new();
     public long TotalDotDamage;
@@ -57,6 +61,9 @@ public class ACTBattle
         public uint Death = 0;
         public uint MaxDamageSkill = 0;
         public uint MaxDamage = 0;
+
+        public long FirstDamageTime;
+        public long LastDamageTime;
     }
 
     public class SkillDamage
@@ -100,29 +107,138 @@ public class ACTBattle
     
 
 
-    public long Duration()
+    private static float DurationSeconds(long startMs, long endMs)
     {
-        return (EndTime - StartTime) switch
-        {
-            <= 0 => 1, //战斗中
-            _ => EndTime - StartTime //战斗结束
-        };
+        if (startMs <= 0 || endMs <= 0) return 1f;
+        var deltaMs = endMs - startMs;
+        if (deltaMs <= 0) return 1f;
+        var seconds = (float)Math.Floor(deltaMs / 1000.0);
+        return seconds <= 0 ? 1f : seconds;
     }
 
-    private bool AddPlayer(uint objectId)
+    private static float GetJobPotencyMulti(uint jobId)
     {
-        var actor = DalamudApi.ObjectTable.FirstOrDefault(x =>
-            x.EntityId == objectId && x.ObjectKind == ObjectKind.Player);
-        if (actor == default || actor.Name.TextValue == "") return false;
-        Name.Add(objectId, actor.Name.TextValue);
-        DataDic.Add(objectId, new Data());
-        DataDic[objectId].Damages = new Dictionary<uint, SkillDamage> {{0, new SkillDamage()}};
+        var index = (int)jobId;
+        return index >= 0 && index < Potency.Muti.Length ? Potency.Muti[index] : 1f;
+    }
 
-        DataDic[objectId].JobId = ((ICharacter) actor).ClassJob.RowId;
-        DataDic[objectId].PotSkill = Potency.BaseSkill[DataDic[objectId].JobId];
-        DataDic[objectId].SkillPotency = 0;
-        DataDic[objectId].Speed = 1f;
-        return true;
+    private static uint GetBaseSkill(uint jobId)
+    {
+        var index = (int)jobId;
+        return index >= 0 && index < Potency.BaseSkill.Length ? Potency.BaseSkill[index] : 0u;
+    }
+
+    public float Duration() => DurationSeconds(StartTime, EndTime);
+
+    public float ActorDuration(uint actor)
+        => DataDic.TryGetValue(actor, out var data)
+            ? DurationSeconds(data.FirstDamageTime, data.LastDamageTime)
+            : Duration();
+
+    private void MarkEncounterActivity(long timeMs)
+    {
+        if (timeMs <= 0) return;
+        if (StartTime == 0) StartTime = timeMs;
+        if (LastEventTime < timeMs) LastEventTime = timeMs;
+        if (EndTime < timeMs) EndTime = timeMs;
+    }
+
+    private void MarkActorActivity(uint actor, long timeMs)
+    {
+        if (timeMs <= 0) return;
+        if (!DataDic.TryGetValue(actor, out var data)) return;
+        if (data.FirstDamageTime == 0) data.FirstDamageTime = timeMs;
+        if (data.LastDamageTime < timeMs) data.LastDamageTime = timeMs;
+    }
+
+    private static bool IsLocalOrPartyMember(uint actorId)
+    {
+        if (actorId == 0 || actorId > 0x40000000) return false;
+
+        var localPlayer = DalamudApi.ObjectTable.LocalPlayer;
+        if (localPlayer != null && localPlayer.EntityId == actorId) return true;
+
+        foreach (var member in DalamudApi.PartyList)
+        {
+            if (member.EntityId == actorId) return true;
+        }
+
+        return false;
+    }
+
+    private bool ShouldTrackEvent(uint sourceId)
+    {
+        if (StartTime != 0) return true;
+        if (DalamudApi.Conditions.Any(ConditionFlag.InCombat)) return true;
+        return sourceId != 0xE0000000 && IsLocalOrPartyMember(sourceId);
+    }
+
+    private void EnsurePlayer(uint objectId)
+    {
+        if (objectId == 0 || objectId > 0x40000000) return;
+
+        if (!DataDic.ContainsKey(objectId))
+        {
+            DataDic.Add(objectId, new Data
+            {
+                Damages = new Dictionary<uint, SkillDamage> { { Total, new SkillDamage() } },
+                Speed = 1f,
+            });
+        }
+        else if (DataDic[objectId].Damages.Count == 0)
+        {
+            DataDic[objectId].Damages = new Dictionary<uint, SkillDamage> { { Total, new SkillDamage() } };
+        }
+        else if (!DataDic[objectId].Damages.ContainsKey(Total))
+        {
+            DataDic[objectId].Damages[Total] = new SkillDamage();
+        }
+
+        if (!Name.TryGetValue(objectId, out var currentName) || string.IsNullOrWhiteSpace(currentName))
+        {
+            var actor = DalamudApi.ObjectTable.FirstOrDefault(x =>
+                x.EntityId == objectId && x.ObjectKind == ObjectKind.Player);
+            if (actor != default && !string.IsNullOrWhiteSpace(actor.Name.TextValue))
+            {
+                Name[objectId] = actor.Name.TextValue;
+            }
+            else
+            {
+                foreach (var member in DalamudApi.PartyList)
+                {
+                    if (member.EntityId != objectId) continue;
+                    var memberName = member.Name.TextValue;
+                    if (!string.IsNullOrWhiteSpace(memberName))
+                        Name[objectId] = memberName;
+                    break;
+                }
+            }
+        }
+
+        var data = DataDic[objectId];
+        if (data.JobId != 0) return;
+
+        uint jobId = 0;
+        var character = DalamudApi.ObjectTable.FirstOrDefault(x =>
+            x.EntityId == objectId && x.ObjectKind == ObjectKind.Player);
+        if (character != default)
+        {
+            jobId = ((ICharacter)character).ClassJob.RowId;
+        }
+        else
+        {
+            foreach (var member in DalamudApi.PartyList)
+            {
+                if (member.EntityId != objectId) continue;
+                jobId = member.ClassJob.RowId;
+                break;
+            }
+        }
+
+        if (jobId == 0) return;
+
+        data.JobId = jobId;
+        data.PotSkill = GetBaseSkill(jobId);
     }
 
     public void AddSS(uint objectId, float casttime, uint actionId)
@@ -146,9 +262,11 @@ public class ACTBattle
         Death = 6,
     }
 
-    public void AddEvent(EventKind eventKind, uint from, uint target, uint id, long damage, byte dc = 0, bool countHit = true)
+    public void AddEvent(EventKind eventKind, uint from, uint target, uint id, long damage, byte dc = 0, bool countHit = true, long eventTimeMs = 0)
     {
-        if ((DalamudApi.ObjectTable.LocalPlayer?.StatusFlags & StatusFlags.InCombat) == 0) return;
+        if (eventTimeMs <= 0) eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        if (!ShouldTrackEvent(from)) return;
 
         if (from > 0x40000000 && from != 0xE0000000 || from == 0x0)
         {
@@ -158,35 +276,37 @@ public class ACTBattle
 
         DalamudApi.Log.Verbose($"AddEvent:{eventKind}:{from:X}:{target:X}:{id}:{damage}");
 
-        if (!Name.ContainsKey(from) && from != 0xE0000000)
-        {
-            var added = AddPlayer(from);
-            if (!added)
-            {
-                DalamudApi.Log.Error($"{from:X} is not found");
-                return;
-            }
-        }
+        if (from != 0xE0000000) EnsurePlayer(from);
 
         //死亡
         if (eventKind == EventKind.Death)
         {
-            if (!Name.ContainsKey(from)) return;
-            DataDic[from].Death++;
+            if (!DataDic.TryGetValue(from, out var data)) return;
+            data.Death++;
             return;
         }
 
         //DOT 伤害
         if (from == 0xE0000000 && eventKind == EventKind.Damage)
         {
-            if (!CheckTargetDot(target)) return;
+            MarkEncounterActivity(eventTimeMs);
             TotalDotDamage += damage;
+            if (!CheckTargetDot(target))
+            {
+                CalcDot();
+                return;
+            }
+
+            if (id != 0 && DotPot().ContainsKey(id))
+                ActiveDots.RemoveAll(dot => dot.BuffId != id);
+
             foreach (var dot in ActiveDots)
             {
                 if (dot.Source > 0x40000000) dot.Source = ResolveOwner(dot.Source);
                 if (dot.Source > 0x40000000) continue;
-                if (!DataDic.ContainsKey(dot.Source)) AddPlayer(dot.Source);
+                EnsurePlayer(dot.Source);
                 if (!DataDic.ContainsKey(dot.Source)) continue;
+                MarkActorActivity(dot.Source, eventTimeMs);
                 
                 var active = DotToActive(dot);
                 if (PlayerDotPotency.ContainsKey(active))
@@ -201,66 +321,67 @@ public class ACTBattle
         //伤害
         if (from != 0xE0000000 && eventKind == EventKind.Damage)
         {
+            MarkEncounterActivity(eventTimeMs);
 
             if (ActionSheet != null && ActionSheet.TryGetRow(id, out var actionRow) && actionRow.PrimaryCostType == 11) //LimitBreak
             {
                 if (LimitBreak.ContainsKey(id)) LimitBreak[id] += damage;
-                else LimitBreak.Add(id,damage);
+                else LimitBreak.Add(id, damage);
             }
-            else 
+
+            MarkActorActivity(from, eventTimeMs);
+            if (SkillPot().TryGetValue(id, out var pot)) //基线技能
             {
-                if (SkillPot().TryGetValue(id, out var pot)) //基线技能
+                if (DataDic[from].PotSkill == id)
                 {
-                    if (DataDic[from].PotSkill == id)
-                    {
-                        DataDic[from].SkillPotency += pot * Potency.Muti[DataDic[from].JobId];
-                    }
-                    else if (id > 10)
-                    {
-                        DataDic[from].PotSkill = id;
-                        DataDic[from].SkillPotency = pot * Potency.Muti[DataDic[from].JobId];
-                    }
+                    DataDic[from].SkillPotency += pot * GetJobPotencyMulti(DataDic[from].JobId);
                 }
+                else if (id > 10)
+                {
+                    DataDic[from].PotSkill = id;
+                    DataDic[from].SkillPotency = pot * GetJobPotencyMulti(DataDic[from].JobId);
+                }
+            }
 
-                if (DataDic[from].Damages.ContainsKey(id))
-                {
-                    DataDic[from].Damages[id].AddDamage(damage);
-                }
-                else
-                {
-                    DataDic[from].Damages.Add(id, new SkillDamage(damage));
-                }
+            if (DataDic[from].Damages.ContainsKey(id))
+            {
+                DataDic[from].Damages[id].AddDamage(damage);
+            }
+            else
+            {
+                DataDic[from].Damages.Add(id, new SkillDamage(damage));
+            }
 
-                if (DataDic[from].MaxDamage < damage)
-                {
-                    DataDic[from].MaxDamage = (uint)damage;
-                    DataDic[from].MaxDamageSkill = id;
-                }
+            if (DataDic[from].MaxDamage < damage)
+            {
+                DataDic[from].MaxDamage = (uint)damage;
+                DataDic[from].MaxDamageSkill = id;
+            }
 
-                if (countHit)
-                {
-                    DataDic[from].Damages[id].AddDC(dc);
-                }
-                DataDic[from].Damages[Total].AddDamage(damage);
-                if (countHit)
-                {
-                    DataDic[from].Damages[Total].AddDC(dc);
-                }
+            if (countHit)
+            {
+                DataDic[from].Damages[id].AddDC(dc);
+            }
+            DataDic[from].Damages[Total].AddDamage(damage);
+            if (countHit)
+            {
+                DataDic[from].Damages[Total].AddDC(dc);
             }
         }
     }
 
-    public void AddDotDamage(uint from, long damage, byte dc = 0)
+    public void AddDotDamage(uint from, long damage, byte dc = 0, long eventTimeMs = 0)
     {
-        if ((DalamudApi.ObjectTable.LocalPlayer?.StatusFlags & StatusFlags.InCombat) == 0) return;
+        if (eventTimeMs <= 0) eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (!ShouldTrackEvent(from)) return;
         if (from > 0x40000000 || from == 0x0) return;
 
-        if (!Name.ContainsKey(from))
-        {
-            if (!AddPlayer(from)) return;
-        }
+        MarkEncounterActivity(eventTimeMs);
+
+        EnsurePlayer(from);
         if (!DataDic.ContainsKey(from)) return;
 
+        MarkActorActivity(from, eventTimeMs);
         DataDic[from].Damages[Total].AddDamage(damage);
     }
 
@@ -302,6 +423,23 @@ public class ACTBattle
     private static long DotToActive(Dot dot)
     {
         return ((long) dot.BuffId << 32) + dot.Source;
+    }
+
+    private static ulong DotCacheKey(uint targetId, uint buffId)
+        => ((ulong)buffId << 32) | targetId;
+
+    public bool TryGetCachedDotSource(uint targetId, uint buffId, out uint source)
+    {
+        source = 0;
+        if (targetId == 0 || buffId == 0) return false;
+        return DotSourceCache.TryGetValue(DotCacheKey(targetId, buffId), out source) && source is > 0 and <= 0x40000000;
+    }
+
+    public void RememberDotSource(uint targetId, uint buffId, uint source)
+    {
+        if (targetId == 0 || buffId == 0) return;
+        if (source == 0 || source > 0x40000000) return;
+        DotSourceCache[DotCacheKey(targetId, buffId)] = source;
     }
 
     public float DPP(uint actor)
