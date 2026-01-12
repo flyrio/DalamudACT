@@ -1,11 +1,11 @@
-﻿{
+{
     "Author": "wozaiha",
     "Name": "伤害统计",
     "Punchline": "简单的显示一下DPS",
     "Description": "非满级情况或野外有概率不精确,青魔不适用望周知",
-    "IconUrl": "https://github.com/wozaiha/DalamudACT/raw/main/DalamudACT/images/icon.png",
+    "IconUrl": "https://github.com/flyrio/DalamudACT/raw/master/DalamudACT/images/icon.png",
     "ImageUrls": [],
-    "RepoUrl": "https://github.com/wozaiha/DalamudACT",
+    "RepoUrl": "https://github.com/flyrio/DalamudACT",
     "CategoryTags": [
         "ACT"
     ],
