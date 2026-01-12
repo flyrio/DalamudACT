@@ -10,4 +10,4 @@
 - 修复：ActionEffect 多目标解析（按 Header.NumTargets/targetCount 解析）
 - 修复：DoT 归因与未知来源 DoT 统计口径（含 sourceId 缓存/回退）
 - 修复：统计丢事件导致总伤害偏低（计入门槛放宽、PartyList 兜底建档、未知来源 DoT 无法扫描仍计入）
-
+- 修复：参考 DeathBuffTracker，ActionEffect 改用 `ActionEffectHandler.Receive` 的签名与结构体解析，减少漏算与版本漂移

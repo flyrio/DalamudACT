@@ -11,10 +11,11 @@
 ## 关键设计
 
 ### ActionEffect 解析（伤害事件）
-- 入口：`ReceiveAbilityEffect` Hook
-- `targetCount`：从 Header 偏移 `0x21` 读取，按真实目标数遍历，避免尾部脏数据造成误判/误计
-- 每目标解析 8 个 `EffectEntry`，当前仅统计与伤害相关的 `type`（如：Damage/Blocked/Parried）
-- 伤害值：按 `param0 + (param4 << 16)` 组合 32 位伤害（由 `param5` 标志位决定是否存在高位）
+- 入口：`ActionEffectHandler.Receive` Hook（签名：`ActionEffectHandler.Addresses.Receive.String`）
+- `targetCount`：使用 `Header.NumTargets`，按真实目标数遍历（不因 `targetId==0` 提前 break）
+- 每目标解析 8 个 `Effect`，仅统计伤害类 `Type`（Damage/BlockedDamage/ParriedDamage）
+- 技能 ID：优先使用 `Header.SpellId`，为 0 时回退到 `Header.ActionId`
+- 伤害值：`Value` + `Param3 << 16`（当 `Param4 & 0x40` 置位时）
 
 ### DoT/死亡事件
 - DoT：由 `ActorControlSelf`（`ActorControlCategory.DoT`）接入
@@ -43,4 +44,4 @@
 ## 历史记录
 - [202601120554_act_damage_sync](../../history/2026-01/202601120554_act_damage_sync/) - 对齐 ACT：多目标/DoT/计时口径
 - [202601120627_act_damage_sync_v2](../../history/2026-01/202601120627_act_damage_sync_v2/) - 修复丢事件/PartyList 兜底/未知 DoT 漏算
-
+- [202601121134_damage_parser_ref_deathbufftracker](../../history/2026-01/202601121134_damage_parser_ref_deathbufftracker/) - 参考 DeathBuffTracker：切换 ActionEffectHandler 解析与签名，修正目标遍历

@@ -10,6 +10,7 @@
 | 202601101832 | summary_window_drag_style | 轻量迭代 | 已完成 | [link](2026-01/202601101832_summary_window_drag_style/) |
 | 202601120554 | act_damage_sync | 轻量迭代 | 已完成 | [link](2026-01/202601120554_act_damage_sync/) |
 | 202601120627 | act_damage_sync_v2 | 轻量迭代 | 已完成 | [link](2026-01/202601120627_act_damage_sync_v2/) |
+| 202601121134 | damage_parser_ref_deathbufftracker | 轻量迭代 | 已完成 | [link](2026-01/202601121134_damage_parser_ref_deathbufftracker/) |
 
 ## 按月
 
@@ -18,4 +19,4 @@
 - [202601101832_summary_window_drag_style](2026-01/202601101832_summary_window_drag_style/) - Summary 窗口拖拽交互（Alt）
 - [202601120554_act_damage_sync](2026-01/202601120554_act_damage_sync/) - 对齐 ACT：DPS/ENCDPS、LB、多目标、DoT 归因
 - [202601120627_act_damage_sync_v2](2026-01/202601120627_act_damage_sync_v2/) - 对齐 ACT：修复丢事件/PartyList 兜底/未知 DoT 漏算
-
+- [202601121134_damage_parser_ref_deathbufftracker](2026-01/202601121134_damage_parser_ref_deathbufftracker/) - 参考 DeathBuffTracker：切换 ActionEffectHandler 解析与签名

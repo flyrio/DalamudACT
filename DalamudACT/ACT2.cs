@@ -12,6 +12,8 @@ using Dalamud.Plugin.Services;
 using DalamudACT.Struct;
 using Dalamud.Interface.GameFonts;
 using Dalamud.Interface.ManagedFontAtlas;
+using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using Lumina.Excel;
 using Lumina.Excel.Sheets;
 using Action = Lumina.Excel.Sheets.Action;
@@ -35,8 +37,13 @@ namespace DalamudACT
         internal IFontHandle? SummaryFontHandle;
         private bool wasInCombat;
 
-        private delegate void ReceiveAbilityDelegate(int sourceId, nint sourceCharacter, nint pos,
-            nint effectHeader, nint effectArray, nint effectTrail);
+        private unsafe delegate void ReceiveAbilityDelegate(
+            uint sourceId,
+            nint sourceCharacter,
+            nint pos,
+            ActionEffectHandler.Header* effectHeader,
+            ActionEffectHandler.TargetEffects* effectArray,
+            GameObjectId* effectTrail);
 
         private Hook<ReceiveAbilityDelegate> ReceiveAbilityHook;
 
@@ -64,8 +71,11 @@ namespace DalamudACT
 
         #region OPcode & Hook functions
 
-        private unsafe void Ability(nint headPtr, nint effectPtr, nint targetPtr, uint sourceId, int length)
+        private unsafe void Ability(ActionEffectHandler.Header* header, ActionEffectHandler.TargetEffects* effects, GameObjectId* targets, uint sourceId)
         {
+            var length = header->NumTargets;
+            if (length == 0) return;
+
             DalamudApi.Log.Verbose($"-----------------------Ability{length}:{sourceId:X}------------------------------");
 
             var originalSourceId = sourceId;
@@ -75,38 +85,30 @@ namespace DalamudACT
             if (sourceId == 0xE0000000 && originalSourceId != 0xE0000000) return;
             if (sourceId is > 0x40000000 or 0x0) return;
 
-            var header = Marshal.PtrToStructure<Header>(headPtr);
-            var effect = (EffectEntry*)effectPtr;
-            var target = (ulong*)targetPtr;
+            var actionId = header->SpellId != 0 ? (uint)header->SpellId : header->ActionId;
             var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             lock (SyncRoot)
             {
                 for (var i = 0; i < length; i++)
                 {
-                    DalamudApi.Log.Verbose(
-                        $"{*target:X} effect:{effect->type}:{effect->param0}:{effect->param1}:{effect->param2}:{effect->param3}:{effect->param4}:{effect->param5}");
-                    if (*target == 0x0) break;
+                    var targetId = (uint)(targets[i] & uint.MaxValue);
+                    if (targetId == 0) continue;
 
                     for (var j = 0; j < 8; j++)
                     {
-                        if (effect->type is 3 or 5 or 6) // Damage / Blocked / Parried
+                        ref var effect = ref effects[i].Effects[j];
+                        if (effect.Type is 3 or 5 or 6) // Damage / Blocked / Parried
                         {
-                            var damage = (uint)effect->param0;
-                            if ((effect->param5 & 0x40) != 0)
-                                damage += (uint)(effect->param4 * 65536);
+                            var damage = (uint)effect.Value;
+                            if ((effect.Param4 & 0x40) != 0)
+                                damage += (uint)effect.Param3 << 16;
 
-                            var targetId = ((effect->param5 & 0x80) != 0) ? sourceId : (uint)*target;
-                            var critDh = (byte)(effect->param1 & 0x60);
+                            var critDh = (byte)(effect.Param0 & 0x60);
 
-                            DalamudApi.Log.Verbose($"EffectEntry:{effect->type},{sourceId:X}:{targetId:X}:{header.actionId},{damage}");
-                            Battles[^1].AddEvent(EventKind.Damage, sourceId, targetId, header.actionId, damage, critDh, eventTimeMs: eventTimeMs);
+                            Battles[^1].AddEvent(EventKind.Damage, sourceId, targetId, actionId, damage, critDh, eventTimeMs: eventTimeMs);
                         }
-
-                        effect++;
                     }
-
-                    target++;
                 }
             }
 
@@ -195,14 +197,18 @@ namespace DalamudACT
             }
         }
 
-        private unsafe void ReceiveAbilityEffect(int sourceId, IntPtr sourceCharacter, IntPtr pos, IntPtr effectHeader,
-            IntPtr effectArray, IntPtr effectTrail)
+        private unsafe void ReceiveAbilityEffect(
+            uint sourceId,
+            nint sourceCharacter,
+            nint pos,
+            ActionEffectHandler.Header* effectHeader,
+            ActionEffectHandler.TargetEffects* effectArray,
+            GameObjectId* effectTrail)
         {
-            var targetCount = *(byte*)(effectHeader + 0x21);
-            if (targetCount > 0)
-                Ability(effectHeader, effectArray, effectTrail, (uint)sourceId, targetCount);
-
             ReceiveAbilityHook.Original(sourceId, sourceCharacter, pos, effectHeader, effectArray, effectTrail);
+
+            if (effectHeader->NumTargets > 0)
+                Ability(effectHeader, effectArray, effectTrail, sourceId);
         }
 
         #endregion
@@ -309,10 +315,11 @@ namespace DalamudACT
             }
 
             #region Hook
+            unsafe
             {
-                // ReceiveAbility 签名保持不变
-                ReceiveAbilityHook = DalamudApi.Interop.HookFromAddress<ReceiveAbilityDelegate>(
-                    DalamudApi.SigScanner.ScanText("40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ??"),
+                // ReceiveAbility：使用 FFXIVClientStructs 提供的签名，减少版本漂移
+                ReceiveAbilityHook = DalamudApi.Interop.HookFromSignature<ReceiveAbilityDelegate>(
+                    ActionEffectHandler.Addresses.Receive.String,
                     ReceiveAbilityEffect);
                 ReceiveAbilityHook.Enable();
 
