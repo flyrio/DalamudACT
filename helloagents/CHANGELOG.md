@@ -12,6 +12,7 @@
 - 修复：DoT tick `buffId=0` 时的唯一匹配推断与技能明细展示（并提供 DoT 诊断开关与统计）
 - 修复：DoT 威力表补齐 `statusId=1200`，避免高等级 DoT 分配漏算/误归因
 - 新增：PotencyUpdater 支持从 ff14mcp 同步 DotPot（`--ff14mcp-dots`）
+- 更新：7.4 DoT 数据集（ff14-mcp）并同步 DotPot
 - 优化：DoT tick `buffId=0` 且同源多 DoT 时按伤害匹配推断（`TryResolveDotBuffByDamage`）
 - 优化：DoT tick 同时缺失 `sourceId`/`buffId` 时按伤害匹配推断（`TryResolveDotPairByDamage`），失败回退到模拟分配
 - 优化：`CalcDot` 在 DPP 不就绪时使用 fallback，避免 DoT 分配长时间不变动

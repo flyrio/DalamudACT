@@ -16,6 +16,7 @@
 | 202601140004 | dot_capture_disambiguate | 轻量迭代 | 已完成 | [link](2026-01/202601140004_dot_capture_disambiguate/) |
 | 202601141010 | dot_sync_ff14mcp | 轻量迭代 | 已完成 | [link](2026-01/202601141010_dot_sync_ff14mcp/) |
 | 202601150118 | dot_attribution_accuracy | 标准开发 | 已完成 | [link](2026-01/202601150118_dot_attribution_accuracy/) |
+| 202601150539 | dot_catalog_sync_74 | 标准开发 | 已完成 | [link](2026-01/202601150539_dot_catalog_sync_74/) |
 
 ## 按月
 
@@ -30,3 +31,4 @@
 - [202601140004_dot_capture_disambiguate](2026-01/202601140004_dot_capture_disambiguate/) - DoT tick 按伤害匹配归因补强
 - [202601141010_dot_sync_ff14mcp](2026-01/202601141010_dot_sync_ff14mcp/) - DotPot 从 ff14mcp 同步（补齐缺失 DoT 状态与威力）
 - [202601150118_dot_attribution_accuracy](2026-01/202601150118_dot_attribution_accuracy/) - DoT 归因稳定性与去重修复
+- [202601150539_dot_catalog_sync_74](2026-01/202601150539_dot_catalog_sync_74/) - 7.4 DoT 数据集与 DotPot 同步
