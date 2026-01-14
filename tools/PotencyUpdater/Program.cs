@@ -52,6 +52,8 @@ internal static class Program
         { 34569, 3636 }, // Peat Pelt -> Begrimed
     };
 
+    private static readonly Dictionary<uint, uint> DotPotencyOverrides = new();
+
     public static async Task<int> Main(string[] args)
     {
         var options = Options.Parse(args);
@@ -717,6 +719,10 @@ internal static class Program
 
         var mergedDotPot = ParseExistingDotPot(content);
         foreach (var (statusId, potency) in ffDotPot)
+        {
+            mergedDotPot[statusId] = potency;
+        }
+        foreach (var (statusId, potency) in DotPotencyOverrides)
         {
             mergedDotPot[statusId] = potency;
         }

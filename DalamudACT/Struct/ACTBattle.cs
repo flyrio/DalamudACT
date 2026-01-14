@@ -615,6 +615,114 @@ public class ACTBattle
         return true;
     }
 
+    public bool TryResolveDotBuffFromTarget(uint targetId, out uint buffId)
+    {
+        buffId = 0;
+
+        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
+
+        uint matchedBuff = 0;
+        var dotPot = DotPot();
+        foreach (var status in ((IBattleNpc)target).StatusList)
+        {
+            if (!dotPot.ContainsKey(status.StatusId)) continue;
+            var resolved = ResolveOwner(status.SourceId);
+            if (!IsLocalOrPartyMember(resolved)) continue;
+            if (matchedBuff != 0 && matchedBuff != status.StatusId) return false;
+            matchedBuff = status.StatusId;
+        }
+
+        if (matchedBuff == 0) return false;
+        buffId = matchedBuff;
+        return true;
+    }
+
+    public bool TryResolveDotBuffByDamageWithoutSource(uint targetId, long damage, out uint buffId)
+    {
+        buffId = 0;
+        if (damage <= 0) return false;
+
+        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
+
+        var dotPot = DotPot();
+        var pairs = new HashSet<ulong>();
+        var candidates = new List<(uint Source, uint Buff)>();
+        foreach (var status in ((IBattleNpc)target).StatusList)
+        {
+            if (!dotPot.ContainsKey(status.StatusId)) continue;
+            var resolved = ResolveOwner(status.SourceId);
+            if (!IsLocalOrPartyMember(resolved)) continue;
+
+            var key = ((ulong)resolved << 32) | status.StatusId;
+            if (!pairs.Add(key)) continue;
+            candidates.Add((resolved, status.StatusId));
+        }
+
+        if (candidates.Count == 0) return false;
+
+        uint uniqueBuff = 0;
+        foreach (var (_, buff) in candidates)
+        {
+            if (uniqueBuff == 0)
+            {
+                uniqueBuff = buff;
+            }
+            else if (uniqueBuff != buff)
+            {
+                uniqueBuff = 0;
+                break;
+            }
+        }
+
+        if (uniqueBuff != 0)
+        {
+            buffId = uniqueBuff;
+            return true;
+        }
+
+        var knownDpp = new List<float>();
+        foreach (var (src, _) in candidates)
+        {
+            EnsurePlayer(src);
+            var dpp = DPP(src);
+            if (dpp > 0) knownDpp.Add(dpp);
+        }
+
+        var fallbackDpp = knownDpp.Count > 0 ? knownDpp.Average() : 1f;
+
+        var bestError = float.PositiveInfinity;
+        var secondError = float.PositiveInfinity;
+        uint bestBuff = 0;
+        foreach (var (src, buff) in candidates)
+        {
+            var dpp = DPP(src);
+            if (dpp <= 0) dpp = fallbackDpp;
+            if (dpp <= 0) continue;
+
+            var basePred = dpp * dotPot[buff];
+            var err = BestDotTickRelativeError(basePred, damage);
+            if (err < bestError)
+            {
+                secondError = bestError;
+                bestError = err;
+                bestBuff = buff;
+            }
+            else if (err < secondError)
+            {
+                secondError = err;
+            }
+        }
+
+        const float maxError = 0.18f;
+        const float minSeparation = 0.05f;
+        if (bestBuff == 0 || bestError > maxError || secondError - bestError < minSeparation) return false;
+
+        buffId = bestBuff;
+        return true;
+    }
+
     public bool TryResolveDotBuffByDamage(uint targetId, uint sourceId, long damage, out uint buffId)
     {
         buffId = 0;

@@ -6,7 +6,7 @@
 ## 模块概述
 - **职责**：维护 `ACTBattle`（遭遇）内的伤害/死亡/DoT 统计与持续时间口径
 - **状态**：稳定
-- **最后更新**：2026-01-14
+- **最后更新**：2026-01-15
 
 ## 关键设计
 
@@ -33,7 +33,8 @@
   - 始终计入 `TotalDotDamage`（即使无法读取目标状态列表）
   - 若可读取目标状态：结合 `(targetId,buffId)->sourceId` 缓存与目标身上同 `buffId` 的 `SourceId` 推断/分配，并通过 `CalcDot` 更新 `DotDmgList`
   - 若不可读取目标状态：仍触发 `CalcDot` 以保持 `TotalDotDamage` 与分配结果一致，避免总伤害偏低
-- **未知来源 DoT（按伤害匹配）**：当 tick 同时缺失 `sourceId` 与 `buffId` 时，启用增强归因后尝试用目标 `StatusList` + DPP + DoT 威力匹配到唯一 `(source,status)` 组合（`TryResolveDotPairByDamage`）；失败则回退到模拟分配
+- **未知来源 DoT（按伤害匹配）**：当 tick 同时缺失 `sourceId` 与 `buffId` 时，启用增强归因后仅推断 `buffId`（优先唯一状态，其次按伤害匹配），不推断来源；失败则回退到模拟分配
+- **去重口径**：去重仅在跨通道重复时生效，避免未知来源或同通道事件被误删
 - **模拟分配兜底（DPP 不就绪）**：`CalcDot` 会用已知玩家 DPP 的平均值作为 fallback，让分配更连续，避免未记录基准技能导致 DoT 长时间不变动
 - **诊断口径**：`EnableDotDiagnostics` 开启后在设置窗口展示入队/处理/去重/未知来源/推断次数，并输出 Verbose 日志
 

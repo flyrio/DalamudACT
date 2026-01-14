@@ -6,7 +6,7 @@
 ## 模块概述
 - **职责:** Potency 表维护与映射
 - **状态:** ✅稳定
-- **最后更新:** 2026-01-14
+- **最后更新:** 2026-01-15
 
 ## 规范
 
@@ -18,6 +18,7 @@
 - 提供新版本的 SkillPot/DotPot
 - 避免旧版本数据干扰统计
 - DotPot 同步：运行 PotencyUpdater 的 `--ff14mcp-dots` 从 ff14mcp 的 `dots_by_job.json` 更新 DotPot（无需访问 XIVAPI）
+- 若发现 buffId 推断失败或状态缺失，优先对照 ff14mcp DoT 数据并补齐 PotencyUpdater 覆盖项
 - SkillPot 更新：仍使用默认模式（需要 `--game`，并从 XIVAPI 拉取英文描述解析）
 
 ## API接口

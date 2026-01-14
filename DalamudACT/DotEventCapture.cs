@@ -83,10 +83,22 @@ internal sealed class DotEventCapture
 {
     private readonly object gate = new();
     private readonly Queue<DotTickEvent> queue = new();
-    private readonly Dictionary<ulong, long> dedupLastMsByKey = new();
-    private readonly Queue<(ulong Key, long TimeMs)> dedupWindow = new();
+    private readonly Dictionary<ulong, DedupEntry> dedupLastByKey = new();
+    private readonly Queue<(ulong Key, long TimeMs, DotTickChannel Channel)> dedupWindow = new();
 
     private readonly Configuration config;
+
+    private readonly struct DedupEntry
+    {
+        public readonly long TimeMs;
+        public readonly DotTickChannel Channel;
+
+        public DedupEntry(long timeMs, DotTickChannel channel)
+        {
+            TimeMs = timeMs;
+            Channel = channel;
+        }
+    }
 
     private long enqueuedTotal;
     private long enqueuedLegacy;
@@ -115,7 +127,7 @@ internal sealed class DotEventCapture
         lock (gate)
         {
             queue.Clear();
-            dedupLastMsByKey.Clear();
+            dedupLastByKey.Clear();
             dedupWindow.Clear();
         }
     }
@@ -216,22 +228,17 @@ internal sealed class DotEventCapture
 
         if (config.EnableEnhancedDotCapture && buffId == 0 && (sourceId == 0 || sourceId > 0x4000_0000))
         {
-            if (battle.TryResolveDotPairByDamage(targetId, damage, out var resolvedSource, out var resolvedBuff))
+            if (battle.TryResolveDotBuffFromTarget(targetId, out var resolvedBuff) ||
+                battle.TryResolveDotBuffByDamageWithoutSource(targetId, damage, out resolvedBuff))
             {
-                sourceId = resolvedSource;
                 buffId = resolvedBuff;
-                battle.RememberDotSource(targetId, buffId, sourceId);
-                battle.RememberDotBuff(targetId, sourceId, buffId);
                 lock (gate)
-                {
-                    inferredSource++;
                     inferredBuff++;
-                }
             }
         }
 
-        // 跨通道去重：避免增强采集与 legacy 同时计入导致翻倍。
-        if (IsDuplicate(timeMs, sourceId, targetId, evt.Damage))
+        // 跨通道去重：仅在不同通道重复时丢弃，避免未知来源/同通道误删。
+        if (IsDuplicate(timeMs, sourceId, targetId, evt.Damage, evt.Channel))
         {
             lock (gate)
                 dedupDropped++;
@@ -283,7 +290,7 @@ internal sealed class DotEventCapture
         battle.AddDotDamage(sourceId, damage, eventTimeMs: timeMs);
     }
 
-    private bool IsDuplicate(long timeMs, uint sourceId, uint targetId, uint damage)
+    private bool IsDuplicate(long timeMs, uint sourceId, uint targetId, uint damage, DotTickChannel channel)
     {
         var key = DedupKey(sourceId, targetId, damage);
 
@@ -291,19 +298,27 @@ internal sealed class DotEventCapture
         {
             while (dedupWindow.Count > 0)
             {
-                var (oldKey, oldTime) = dedupWindow.Peek();
+                var (oldKey, oldTime, oldChannel) = dedupWindow.Peek();
                 if (timeMs - oldTime <= DedupWindowMs) break;
                 dedupWindow.Dequeue();
-                if (dedupLastMsByKey.TryGetValue(oldKey, out var stored) && stored == oldTime)
-                    dedupLastMsByKey.Remove(oldKey);
+                if (dedupLastByKey.TryGetValue(oldKey, out var stored) &&
+                    stored.TimeMs == oldTime &&
+                    stored.Channel == oldChannel)
+                {
+                    dedupLastByKey.Remove(oldKey);
+                }
             }
 
-            if (dedupLastMsByKey.TryGetValue(key, out var lastMs) && timeMs - lastMs <= DedupWindowMs)
-                return true;
+            var isDuplicate = false;
+            if (dedupLastByKey.TryGetValue(key, out var last) && timeMs - last.TimeMs <= DedupWindowMs)
+            {
+                if (last.Channel != channel)
+                    isDuplicate = true;
+            }
 
-            dedupLastMsByKey[key] = timeMs;
-            dedupWindow.Enqueue((key, timeMs));
-            return false;
+            dedupLastByKey[key] = new DedupEntry(timeMs, channel);
+            dedupWindow.Enqueue((key, timeMs, channel));
+            return isDuplicate;
         }
     }
 

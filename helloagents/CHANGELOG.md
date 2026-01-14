@@ -18,3 +18,5 @@
 - 修复：统计丢事件导致总伤害偏低（计入门槛放宽、PartyList 兜底建档、未知来源 DoT 无法扫描仍计入）
 - 修复：参考 DeathBuffTracker，ActionEffect 改用 `ActionEffectHandler.Receive` 的签名与结构体解析，减少漏算与版本漂移
 - 更新：插件图标（统计图标重绘）
+- 修复：DoT 去重仅跨通道生效，避免未知来源/同通道误删导致总伤害偏低
+- 优化：未知来源 DoT 仅推断 `buffId` 用于模拟分配，不再强行推断来源
