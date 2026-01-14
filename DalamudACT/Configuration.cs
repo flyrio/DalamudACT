@@ -8,7 +8,7 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 14;
+        private const int CurrentVersion = 15;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
@@ -49,6 +49,10 @@ namespace DalamudACT
 
         // 0=ENCDPS(按战斗时长) 1=DPS(按个人活跃时长)
         public int DpsTimeMode = 1;
+
+        // DoT 采集与诊断
+        public bool EnableEnhancedDotCapture = false;
+        public bool EnableDotDiagnostics = false;
 
         // the below exist just to make saving less cumbersome
 
@@ -143,6 +147,12 @@ namespace DalamudACT
                 if (Version < 14)
                 {
                     DpsTimeMode = 1;
+                }
+
+                if (Version < 15)
+                {
+                    EnableEnhancedDotCapture = false;
+                    EnableDotDiagnostics = false;
                 }
 
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列

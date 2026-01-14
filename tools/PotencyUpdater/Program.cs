@@ -8,6 +8,7 @@ using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -58,6 +59,15 @@ internal static class Program
         {
             PrintUsage();
             return 1;
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.Ff14McpDotsPath))
+        {
+            var targetPotencyPath = ResolvePotencyPath(options.PotencyPath);
+            var ff14McpPath = ResolveFf14McpDotsPath(options.Ff14McpDotsPath);
+            UpdateDotPotFromFf14Mcp(ff14McpPath, targetPotencyPath);
+            Console.WriteLine($"Updated {targetPotencyPath}");
+            return 0;
         }
 
         var sqpackPath = ResolveGamePath(options.GamePath);
@@ -216,7 +226,10 @@ internal static class Program
 
     private static void PrintUsage()
     {
-        Console.WriteLine("Usage: dotnet run --project tools/PotencyUpdater -- [--game <sqpack|game|exe path>] [--potency <Potency.cs path>] [--max-concurrency <n>] [--find-action <name>] [--find-status <name>] [--find-status-desc <text>] [--find-status-icon <iconId>] [--dump-action <id>] [--dump-status <id>] [--status-action <id>] [--status-job <abbr>] [--status-potency <n>] [--lang <cn|en|ja|de|fr|tw>] [--status-schema] [--action-schema] [--action-transient-schema] [--action-proc-schema] [--list-sheets [filter]] [--aoz-action-schema] [--aoz-action-transient-schema] [--sheet-schema <name>]");
+        Console.WriteLine("Usage:");
+        Console.WriteLine("  dotnet run --project tools/PotencyUpdater -- [--game <sqpack|game|exe path>] [--potency <Potency.cs path>] [--max-concurrency <n>] [--find-action <name>] [--find-status <name>] [--find-status-desc <text>] [--find-status-icon <iconId>] [--dump-action <id>] [--dump-status <id>] [--status-action <id>] [--status-job <abbr>] [--status-potency <n>] [--lang <cn|en|ja|de|fr|tw>] [--status-schema] [--action-schema] [--action-transient-schema] [--action-proc-schema] [--list-sheets [filter]] [--aoz-action-schema] [--aoz-action-transient-schema] [--sheet-schema <name>]");
+        Console.WriteLine();
+        Console.WriteLine("  dotnet run --project tools/PotencyUpdater -- [--potency <Potency.cs path>] --ff14mcp-dots <ff14-mcp root|dots_by_job.json>");
     }
 
     private static string? ResolveGamePath(string? arg)
@@ -653,6 +666,153 @@ internal static class Program
         }
 
         return Path.GetFullPath(Path.Combine(root, "..", "..", "..", "DalamudACT", "Potency.cs"));
+    }
+
+    private static string ResolveFf14McpDotsPath(string arg)
+    {
+        var path = arg.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new ArgumentException("ff14mcp dots path is empty.");
+        }
+
+        if (Directory.Exists(path))
+        {
+            var candidate = Path.Combine(path, "data", "dots_by_job.json");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            candidate = Path.Combine(path, "dots_by_job.json");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        if (File.Exists(path))
+        {
+            return Path.GetFullPath(path);
+        }
+
+        throw new FileNotFoundException($"ff14mcp dots file not found: {path}");
+    }
+
+    private static void UpdateDotPotFromFf14Mcp(string ff14McpDotsPath, string potencyPath)
+    {
+        var entries = ReadFf14McpDotEntries(ff14McpDotsPath);
+        if (entries.Count == 0)
+        {
+            Console.Error.WriteLine("ff14mcp dots file contains no entries.");
+            return;
+        }
+
+        var warnings = new List<string>();
+        var ffDotPot = BuildFf14McpDotPot(entries, warnings);
+
+        var originalBytes = File.ReadAllBytes(potencyPath);
+        var content = Encoding.Latin1.GetString(originalBytes);
+        var newline = content.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+
+        var mergedDotPot = ParseExistingDotPot(content);
+        foreach (var (statusId, potency) in ffDotPot)
+        {
+            mergedDotPot[statusId] = potency;
+        }
+
+        var dotSection = BuildDotPotSection(mergedDotPot, newline);
+        content = ReplaceSection(content, DotPotStart, DotPotEnd, dotSection, newline);
+
+        var updatedBytes = Encoding.Latin1.GetBytes(content);
+        File.WriteAllBytes(potencyPath, updatedBytes);
+
+        Console.WriteLine($"ff14mcp dots: {entries.Count} entries, {ffDotPot.Count} unique status ids");
+        Console.WriteLine($"DotPot entries: {mergedDotPot.Count}");
+
+        if (warnings.Count > 0)
+        {
+            var warnPath = Path.Combine(Path.GetDirectoryName(potencyPath) ?? ".", "Potency.update.warnings.txt");
+            File.WriteAllLines(warnPath, warnings.OrderBy(w => w));
+            Console.WriteLine($"Warnings written to {warnPath}");
+        }
+    }
+
+    private static Dictionary<uint, uint> ParseExistingDotPot(string potencyContent)
+    {
+        var startIndex = potencyContent.IndexOf(DotPotStart, StringComparison.Ordinal);
+        var endIndex = potencyContent.IndexOf(DotPotEnd, StringComparison.Ordinal);
+        if (startIndex < 0 || endIndex < 0 || endIndex < startIndex)
+        {
+            throw new InvalidOperationException($"Markers not found: {DotPotStart} / {DotPotEnd}");
+        }
+
+        var section = potencyContent.Substring(startIndex, endIndex - startIndex);
+        var matches = Regex.Matches(section, @"\{\s*(\d+)\s*,\s*(\d+)\s*\}", RegexOptions.CultureInvariant);
+        var result = new Dictionary<uint, uint>();
+        foreach (Match match in matches)
+        {
+            if (!uint.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var statusId))
+            {
+                continue;
+            }
+
+            if (!uint.TryParse(match.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var potency))
+            {
+                continue;
+            }
+
+            result[statusId] = potency;
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyList<Ff14McpDotEntry> ReadFf14McpDotEntries(string path)
+    {
+        var json = File.ReadAllText(path, Encoding.UTF8);
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+        };
+
+        var entries = JsonSerializer.Deserialize<List<Ff14McpDotEntry>>(json, options);
+        return entries ?? [];
+    }
+
+    private static Dictionary<uint, uint> BuildFf14McpDotPot(IReadOnlyList<Ff14McpDotEntry> entries, List<string> warnings)
+    {
+        var byStatus = entries
+            .Where(e => e.StatusId != 0 && e.DotPotency != 0)
+            .GroupBy(e => e.StatusId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var result = new Dictionary<uint, uint>();
+        foreach (var (statusId, group) in byStatus)
+        {
+            var byPotency = group
+                .GroupBy(e => e.DotPotency)
+                .Select(g => new
+                {
+                    Potency = g.Key,
+                    Count = g.Count(),
+                    MaxLevel = g.Max(x => x.Level),
+                })
+                .OrderByDescending(x => x.Count)
+                .ThenByDescending(x => x.MaxLevel)
+                .ThenByDescending(x => x.Potency)
+                .ToList();
+
+            if (byPotency.Count > 1)
+            {
+                var detail = string.Join(", ", byPotency.Select(x => $"{x.Potency}x{x.Count}@{x.MaxLevel}"));
+                warnings.Add($"ff14mcp dot potency conflict for status {statusId}: {detail} (picked {byPotency[0].Potency})");
+            }
+
+            result[statusId] = byPotency[0].Potency;
+        }
+
+        return result;
     }
 
     private static void DumpStatusMatches(string sqpackPath, List<string> queries, Language language)
@@ -1297,6 +1457,7 @@ internal static class Program
     private sealed record Options(
         string? GamePath,
         string? PotencyPath,
+        string? Ff14McpDotsPath,
         int MaxConcurrency,
         List<string> StatusQueries,
         List<string> StatusDescriptionQueries,
@@ -1322,6 +1483,7 @@ internal static class Program
         {
             string? gamePath = null;
             string? potencyPath = null;
+            string? ff14McpDotsPath = null;
             var maxConcurrency = 8;
             var statusQueries = new List<string>();
             var statusDescriptionQueries = new List<string>();
@@ -1359,6 +1521,10 @@ internal static class Program
                     {
                         maxConcurrency = 8;
                     }
+                }
+                else if (arg.Equals("--ff14mcp-dots", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    ff14McpDotsPath = args[++i];
                 }
                 else if (arg.Equals("--find-status", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 {
@@ -1463,6 +1629,7 @@ internal static class Program
             return new Options(
                 gamePath,
                 potencyPath,
+                ff14McpDotsPath,
                 maxConcurrency,
                 statusQueries,
                 statusDescriptionQueries,
@@ -1485,6 +1652,18 @@ internal static class Program
                 CancellationToken.None);
         }
     }
+
+    private sealed record Ff14McpDotEntry(
+        [property: JsonPropertyName("level")] int Level,
+        [property: JsonPropertyName("dot")] Ff14McpDotInfo Dot,
+        [property: JsonPropertyName("status")] Ff14McpStatusInfo Status)
+    {
+        public uint StatusId => Status.Id;
+        public uint DotPotency => Dot.Potency;
+    }
+
+    private sealed record Ff14McpDotInfo([property: JsonPropertyName("potency")] uint Potency);
+    private sealed record Ff14McpStatusInfo([property: JsonPropertyName("id")] uint Id);
 
     private static Language ParseLanguage(string value)
     {

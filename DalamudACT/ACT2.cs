@@ -35,6 +35,7 @@ namespace DalamudACT
         private ExcelSheet<TerritoryType> terrySheet;
         internal IFontHandle? CardsFontHandle;
         internal IFontHandle? SummaryFontHandle;
+        private readonly DotEventCapture dotCapture;
         private bool wasInCombat;
 
         private unsafe delegate void ReceiveAbilityDelegate(
@@ -166,34 +167,14 @@ namespace DalamudACT
 
             if (type is (uint)ActorControlCategory.DoT)
             {
-                var dotBuffId = arg0;
                 var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                lock (SyncRoot)
-                {
-                    if ((sourceId == 0 || sourceId > 0x40000000) && dotBuffId != 0 &&
-                        !Battles[^1].TryGetCachedDotSource(dotTarget, dotBuffId, out sourceId) &&
-                        Battles[^1].TryResolveDotSource(dotTarget, dotBuffId, out var resolvedSource))
-                        sourceId = resolvedSource;
-
-                    DalamudApi.Log.Verbose($"Dot:{dotBuffId} from {sourceId:X} ticked {arg1} damage on {dotTarget:X}");
-                    if (sourceId == 0 || sourceId > 0x40000000)
-                    {
-                        Battles[^1].AddEvent(EventKind.Damage, 0xE0000000, dotTarget, dotBuffId, arg1, countHit: false, eventTimeMs: eventTimeMs);
-                        return;
-                    }
-
-                    Battles[^1].RememberDotSource(dotTarget, dotBuffId, sourceId);
-                    Battles[^1].AddDotTick(sourceId, arg1);
-                    if (dotBuffId != 0 && Potency.BuffToAction.TryGetValue(dotBuffId, out var actionId))
-                    {
-                        Battles[^1].AddEvent(EventKind.Damage, sourceId, dotTarget, actionId, arg1, countHit: false, eventTimeMs: eventTimeMs);
-                    }
-                    else
-                    {
-                        // Prefer attributing the tick to the reported source (and avoid id=0 double-counting in AddEvent).
-                        Battles[^1].AddDotDamage(sourceId, arg1, eventTimeMs: eventTimeMs);
-                    }
-                }
+                dotCapture.Enqueue(new DotTickEvent(
+                    eventTimeMs,
+                    sourceId,
+                    dotTarget,
+                    buffId: arg0,
+                    damage: arg1,
+                    DotTickChannel.LegacyActorControlSelf));
             }
         }
 
@@ -238,6 +219,7 @@ namespace DalamudACT
                     }
 
                     Battles.Add(new ACTBattle(0, 0));
+                    dotCapture.ResetTransientCaches();
                 }
 
                 if (DalamudApi.ObjectTable.LocalPlayer != null && inCombat)
@@ -280,6 +262,8 @@ namespace DalamudACT
 
         private void Update(IFramework framework)
         {
+            lock (SyncRoot)
+                dotCapture.FlushInto(Battles[^1]);
             CheckTime();
         }
 
@@ -289,6 +273,7 @@ namespace DalamudACT
             DalamudApi.Initialize(pluginInterface);
             terrySheet = DalamudApi.GameData.GetExcelSheet<TerritoryType>()!;
             ACTBattle.ActionSheet = DalamudApi.GameData.GetExcelSheet<Action>()!;
+            ACTBattle.StatusSheet = DalamudApi.GameData.GetExcelSheet<Status>()!;
 
             for (uint i = 62100; i <= 62100 + 42; i++)
                 Icon.Add(i - 62100, DalamudApi.TextureProvider.GetFromGameIcon(new GameIconLookup(i)).RentAsync().Result);
@@ -299,6 +284,7 @@ namespace DalamudACT
 
             Configuration = DalamudApi.PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
             Configuration.Initialize(DalamudApi.PluginInterface);
+            dotCapture = new DotEventCapture(Configuration);
 
             try
             {
@@ -448,5 +434,9 @@ namespace DalamudACT
         {
             PluginUi.configWindow.IsOpen = !PluginUi.configWindow.IsOpen;
         }
+
+        internal DotCaptureStats GetDotCaptureStats() => dotCapture.GetStatsSnapshot();
+
+        internal void ResetDotCaptureCaches() => dotCapture.ResetTransientCaches();
     }
 }

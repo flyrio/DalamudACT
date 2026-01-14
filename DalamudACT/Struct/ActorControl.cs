@@ -22,7 +22,7 @@ namespace DalamudACT.Struct
     }
     public enum ActorControlCategory : ushort
     {
-        HoT = 0x603,
+        HoT = 0x604, // Changed in 7.10
         DoT = 0x605,
         CancelAbility = 0x0f,
         Death = 0x06,

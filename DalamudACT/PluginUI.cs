@@ -93,6 +93,9 @@ internal class PluginUI : IDisposable
         return $"{totalSeconds / 3600:00}:{(totalSeconds % 3600) / 60:00}:{totalSeconds % 60:00}";
     }
 
+    private static bool IsDotStatusId(uint id)
+        => Potency.DotPot.ContainsKey(id) || Potency.DotPot94.ContainsKey(id);
+
     private readonly struct BattleView
     {
         public readonly bool HasBattle;
@@ -527,6 +530,21 @@ internal class PluginUI : IDisposable
                         config.SortMode = sortMode;
                         changed = true;
                     }
+                }
+
+                if (ImGui.CollapsingHeader("DoT", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    changed |= ImGui.Checkbox("启用 DoT 增强归因（buffId 推断/技能明细）", ref config.EnableEnhancedDotCapture);
+                    changed |= ImGui.Checkbox("启用 DoT 诊断日志/计数", ref config.EnableDotDiagnostics);
+
+                    var stats = _plugin.GetDotCaptureStats();
+                    ImGui.Separator();
+                    ImGui.Text($"DoT tick 入队: {stats.EnqueuedTotal}（Legacy {stats.EnqueuedLegacy}, Network {stats.EnqueuedNetwork}）");
+                    ImGui.Text($"处理: {stats.Processed}，去重丢弃: {stats.DedupDropped}，非法丢弃: {stats.DroppedInvalid}");
+                    ImGui.Text($"未知来源: {stats.UnknownSource}，buffId=0: {stats.UnknownBuff}，推断来源: {stats.InferredSource}，推断 buff: {stats.InferredBuff}");
+                    ImGui.Text($"归因：Action {stats.AttributedToAction}，Status {stats.AttributedToStatus}，TotalOnly {stats.AttributedToTotalOnly}");
+                    if (ImGui.SmallButton("清空 DoT 去重缓存"))
+                        _plugin.ResetDotCaptureCaches();
                 }
 
                 if (changed) config.Save();
@@ -968,6 +986,7 @@ internal class PluginUI : IDisposable
                 _plugin.Battles.Add(new ACTBattle(0, 0));
             }
 
+            _plugin.ResetDotCaptureCaches();
             dpsBarSprings.Clear();
             ResetHistory();
         }
@@ -977,13 +996,12 @@ internal class PluginUI : IDisposable
             if (actionIconCache.TryGetValue(actionId, out var cached))
                 return cached;
 
-            if (ACTBattle.ActionSheet == null || !ACTBattle.ActionSheet.TryGetRow(actionId, out var action))
-            {
-                actionIconCache[actionId] = null;
-                return null;
-            }
+            uint iconId = 0;
+            if (IsDotStatusId(actionId) && ACTBattle.StatusSheet != null && ACTBattle.StatusSheet.TryGetRow(actionId, out var status))
+                iconId = status.Icon;
+            else if (ACTBattle.ActionSheet != null && ACTBattle.ActionSheet.TryGetRow(actionId, out var action))
+                iconId = action.Icon;
 
-            var iconId = (uint)action.Icon;
             if (iconId == 0)
             {
                 actionIconCache[actionId] = null;
@@ -1496,9 +1514,15 @@ internal class PluginUI : IDisposable
                             if (hoveredData.MaxDamage > 0)
                             {
                                 var maxName = $"#{hoveredData.MaxDamageSkill}";
-                                if (ACTBattle.ActionSheet != null && hoveredData.MaxDamageSkill != 0 &&
-                                    ACTBattle.ActionSheet.TryGetRow(hoveredData.MaxDamageSkill, out var maxAction))
-                                    maxName = maxAction.Name.ExtractText();
+                                if (hoveredData.MaxDamageSkill != 0)
+                                {
+                                    if (IsDotStatusId(hoveredData.MaxDamageSkill) && ACTBattle.StatusSheet != null &&
+                                        ACTBattle.StatusSheet.TryGetRow(hoveredData.MaxDamageSkill, out var maxStatus))
+                                        maxName = maxStatus.Name.ExtractText();
+                                    else if (ACTBattle.ActionSheet != null &&
+                                             ACTBattle.ActionSheet.TryGetRow(hoveredData.MaxDamageSkill, out var maxAction))
+                                        maxName = maxAction.Name.ExtractText();
+                                }
                                 ImGui.TextColored(SecondaryTextColor, $"最大单次 {hoveredData.MaxDamage:N0}  {maxName}");
                             }
 
@@ -1515,7 +1539,10 @@ internal class PluginUI : IDisposable
                                 foreach (var skill in skills)
                                 {
                                     var name = $"#{skill.Id}";
-                                    if (ACTBattle.ActionSheet != null && ACTBattle.ActionSheet.TryGetRow(skill.Id, out var action))
+                                    if (IsDotStatusId(skill.Id) && ACTBattle.StatusSheet != null &&
+                                        ACTBattle.StatusSheet.TryGetRow(skill.Id, out var status))
+                                        name = status.Name.ExtractText();
+                                    else if (ACTBattle.ActionSheet != null && ACTBattle.ActionSheet.TryGetRow(skill.Id, out var action))
                                         name = action.Name.ExtractText();
                                     var pct = row.Damage <= 0 ? 0 : (float)skill.Damage / row.Damage;
                                     var skillDps = GetDps(skill.Damage, row.Actor);
