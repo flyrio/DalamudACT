@@ -17,6 +17,11 @@
 | 202601141010 | dot_sync_ff14mcp | 轻量迭代 | 已完成 | [link](2026-01/202601141010_dot_sync_ff14mcp/) |
 | 202601150118 | dot_attribution_accuracy | 标准开发 | 已完成 | [link](2026-01/202601150118_dot_attribution_accuracy/) |
 | 202601150539 | dot_catalog_sync_74 | 标准开发 | 已完成 | [link](2026-01/202601150539_dot_catalog_sync_74/) |
+| 202601210105 | fix_damage_stat_accuracy | 标准开发 | 已完成 | [link](2026-01/202601210105_fix_damage_stat_accuracy/) |
+| 202601210309 | actlike_dot_pet_attribution | 标准开发 | 已完成 | [link](2026-01/202601210309_actlike_dot_pet_attribution/) |
+| 202601210310 | dot_tick_dedup_fix | 轻量迭代 | 已完成 | [link](2026-01/202601210310_dot_tick_dedup_fix/) |
+| 202601211751 | dot_debug_log | 轻量迭代 | 已完成 | [link](2026-01/202601211751_dot_debug_log/) |
+| 202601220013 | default_encdps | 轻量迭代 | 已完成 | [link](2026-01/202601220013_default_encdps/) |
 
 ## 按月
 
@@ -32,3 +37,8 @@
 - [202601141010_dot_sync_ff14mcp](2026-01/202601141010_dot_sync_ff14mcp/) - DotPot 从 ff14mcp 同步（补齐缺失 DoT 状态与威力）
 - [202601150118_dot_attribution_accuracy](2026-01/202601150118_dot_attribution_accuracy/) - DoT 归因稳定性与去重修复
 - [202601150539_dot_catalog_sync_74](2026-01/202601150539_dot_catalog_sync_74/) - 7.4 DoT 数据集与 DotPot 同步
+- [202601210105_fix_damage_stat_accuracy](2026-01/202601210105_fix_damage_stat_accuracy/) - 修复伤害统计：高伤害值解码
+- [202601210309_actlike_dot_pet_attribution](2026-01/202601210309_actlike_dot_pet_attribution/) - 备选 ACTLike 归因：DoT/召唤物
+- [202601210310_dot_tick_dedup_fix](2026-01/202601210310_dot_tick_dedup_fix/) - 修复 DoT tick 同通道双事件去重
+- [202601211751_dot_debug_log](2026-01/202601211751_dot_debug_log/) - DoT 调试输出写入卫月日志/文件
+- [202601220013_default_encdps](2026-01/202601220013_default_encdps/) - 默认 DPS 口径调整为 ENCDPS

@@ -48,11 +48,14 @@ namespace DalamudACT
         public int TopN = 0; // 0=全部
 
         // 0=ENCDPS(按战斗时长) 1=DPS(按个人活跃时长)
-        public int DpsTimeMode = 1;
+        public int DpsTimeMode = 0;
 
         // DoT 采集与诊断
         public bool EnableEnhancedDotCapture = false;
         public bool EnableDotDiagnostics = false;
+
+        // 备选：ACTLike 归因（DoT/召唤物）
+        public bool EnableActLikeAttribution = false;
 
         // the below exist just to make saving less cumbersome
 
@@ -146,7 +149,7 @@ namespace DalamudACT
 
                 if (Version < 14)
                 {
-                    DpsTimeMode = 1;
+                    DpsTimeMode = 0;
                 }
 
                 if (Version < 15)
@@ -170,7 +173,7 @@ namespace DalamudACT
 
             if (DpsTimeMode is < 0 or > 1)
             {
-                DpsTimeMode = 1;
+                DpsTimeMode = 0;
                 changed = true;
             }
 

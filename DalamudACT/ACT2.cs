@@ -79,15 +79,23 @@ namespace DalamudACT
 
             DalamudApi.Log.Verbose($"-----------------------Ability{length}:{sourceId:X}------------------------------");
 
+            var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
             var originalSourceId = sourceId;
             if (sourceId > 0x40000000 && sourceId != 0xE0000000)
+            {
                 sourceId = ACTBattle.ResolveOwner(sourceId);
+                if (sourceId == 0xE0000000 && originalSourceId != 0xE0000000 && Configuration.EnableActLikeAttribution)
+                {
+                    ACTBattle.WarmOwnerCacheFromObjectTable(eventTimeMs);
+                    sourceId = ACTBattle.ResolveOwner(originalSourceId);
+                }
+            }
 
             if (sourceId == 0xE0000000 && originalSourceId != 0xE0000000) return;
             if (sourceId is > 0x40000000 or 0x0) return;
 
             var actionId = header->SpellId != 0 ? (uint)header->SpellId : header->ActionId;
-            var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             lock (SyncRoot)
             {
@@ -101,9 +109,7 @@ namespace DalamudACT
                         ref var effect = ref effects[i].Effects[j];
                         if (effect.Type is 3 or 5 or 6) // Damage / Blocked / Parried
                         {
-                            var damage = (uint)effect.Value;
-                            if ((effect.Param4 & 0x40) != 0)
-                                damage += (uint)effect.Param3 << 16;
+                            var damage = (uint)effect.Value | ((uint)effect.Param3 << 16);
 
                             var critDh = (byte)(effect.Param0 & 0x60);
 
@@ -157,13 +163,23 @@ namespace DalamudACT
             }
 
             var dotTarget = entityId;
-            if (dotTarget < 0x40000000 && targetId > 0 && targetId <= uint.MaxValue)
-                dotTarget = (uint)targetId;
-            if (dotTarget < 0x40000000) return;
+
+            // DoT 事件的目标可能在 entityId 或 targetId 中；优先使用有效的 BattleNpc EntityId。
+            uint resolvedTarget = 0;
+            if (targetId > 0 && targetId <= uint.MaxValue)
+            {
+                var candidate = (uint)targetId;
+                if (candidate is > 0x40000000 and not 0xE0000000)
+                    resolvedTarget = candidate;
+            }
+
+            if (resolvedTarget == 0 && dotTarget is > 0x40000000 and not 0xE0000000)
+                resolvedTarget = dotTarget;
+
+            if (resolvedTarget == 0) return;
+            dotTarget = resolvedTarget;
 
             var sourceId = arg2;
-            if (sourceId > 0x40000000 && sourceId != 0xE0000000)
-                sourceId = ACTBattle.ResolveOwner(sourceId);
 
             if (type is (uint)ActorControlCategory.DoT)
             {
@@ -262,6 +278,8 @@ namespace DalamudACT
 
         private void Update(IFramework framework)
         {
+            if (Configuration.EnableActLikeAttribution)
+                ACTBattle.WarmOwnerCacheFromObjectTable();
             lock (SyncRoot)
                 dotCapture.FlushInto(Battles[^1]);
             CheckTime();
@@ -327,10 +345,10 @@ namespace DalamudACT
 
             PluginUi = new PluginUI(this);
 
-            DalamudApi.Commands.AddHandler("/act", new CommandInfo(OnCommand)
-            {
-                HelpMessage = "/act 开关独立名片\n/act config 打开设置窗口\n/act prev 查看上一场\n/act next 查看下一场\n/act clear 清空战斗记录"
-            });
+              DalamudApi.Commands.AddHandler("/act", new CommandInfo(OnCommand)
+              {
+                 HelpMessage = "/act 开关独立名片\n/act config 打开设置窗口\n/act prev 查看上一场\n/act next 查看下一场\n/act clear 清空战斗记录\n/act dotstats [log|file] 输出 DoT 采集统计（调试）\n/act dotdump [log|file] [all] [N] 输出最近 DoT tick 事件（调试）"
+              });
 
             DalamudApi.PluginInterface.UiBuilder.Draw += DrawUI;
             DalamudApi.PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUI;
@@ -400,35 +418,255 @@ namespace DalamudACT
             CastHook.Dispose();
         }
 
-        private void OnCommand(string command, string args)
-        {
-            switch (args)
-            {
-                case null or "":
-                    Configuration.CardsEnabled = !Configuration.CardsEnabled;
-                    Configuration.Save();
-                    PluginUi.cardsWindow.IsOpen = Configuration.CardsEnabled;
-                    PluginUi.summaryWindow.IsOpen = Configuration.CardsEnabled && Configuration.SummaryEnabled;
-                    break;
-                case "config":
-                    PluginUi.configWindow.IsOpen = !PluginUi.configWindow.IsOpen;
-                    break;
-                case "prev":
-                    PluginUi.cardsWindow.NudgeHistory(1);
-                    break;
-                case "next":
-                    PluginUi.cardsWindow.NudgeHistory(-1);
-                    break;
-                case "clear":
-                    PluginUi.cardsWindow.ClearBattleHistory();
-                    break;
-            }
-        }
+         private void OnCommand(string command, string args)
+         {
+             var trimmed = args?.Trim();
+             if (string.IsNullOrEmpty(trimmed))
+             {
+                 Configuration.CardsEnabled = !Configuration.CardsEnabled;
+                 Configuration.Save();
+                 PluginUi.cardsWindow.IsOpen = Configuration.CardsEnabled;
+                 PluginUi.summaryWindow.IsOpen = Configuration.CardsEnabled && Configuration.SummaryEnabled;
+                 return;
+             }
 
-        private void DrawUI()
-        {
-            PluginUi.WindowSystem.Draw();
-        }
+             var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+             var subCommand = parts[0];
+
+             switch (subCommand)
+             {
+                 case "config":
+                     PluginUi.configWindow.IsOpen = !PluginUi.configWindow.IsOpen;
+                     break;
+                 case "prev":
+                     PluginUi.cardsWindow.NudgeHistory(1);
+                     break;
+                 case "next":
+                     PluginUi.cardsWindow.NudgeHistory(-1);
+                     break;
+                  case "clear":
+                      PluginUi.cardsWindow.ClearBattleHistory();
+                      break;
+                  case "dotstats":
+                      PrintDotStats(ParseDotDebugTarget(parts, defaultTarget: DotDebugOutputTarget.Chat));
+                      break;
+                  case "dotdump":
+                      ParseDotDumpArgs(parts, out var dumpTarget, out var wantAll, out var max);
+                      PrintDotDump(dumpTarget, wantAll, max);
+                      break;
+              }
+          }
+
+         private static DotDebugOutputTarget ParseDotDebugTarget(string[] args, DotDebugOutputTarget defaultTarget)
+         {
+             var target = defaultTarget;
+             for (var i = 1; i < args.Length; i++)
+             {
+                 if (string.Equals(args[i], "log", StringComparison.OrdinalIgnoreCase))
+                 {
+                     target = DotDebugOutputTarget.DalamudLog;
+                     continue;
+                 }
+
+                 if (string.Equals(args[i], "file", StringComparison.OrdinalIgnoreCase))
+                 {
+                     target = DotDebugOutputTarget.File;
+                     continue;
+                 }
+
+                 if (string.Equals(args[i], "chat", StringComparison.OrdinalIgnoreCase))
+                 {
+                     target = DotDebugOutputTarget.Chat;
+                 }
+             }
+
+             return target;
+         }
+
+         private static void ParseDotDumpArgs(string[] args, out DotDebugOutputTarget target, out bool wantAll, out int max)
+         {
+             target = DotDebugOutputTarget.Chat;
+             wantAll = false;
+             max = 10;
+
+             for (var i = 1; i < args.Length; i++)
+             {
+                 if (string.Equals(args[i], "all", StringComparison.OrdinalIgnoreCase))
+                 {
+                     wantAll = true;
+                     continue;
+                 }
+
+                 if (string.Equals(args[i], "log", StringComparison.OrdinalIgnoreCase))
+                 {
+                     target = DotDebugOutputTarget.DalamudLog;
+                     continue;
+                 }
+
+                 if (string.Equals(args[i], "file", StringComparison.OrdinalIgnoreCase))
+                 {
+                     target = DotDebugOutputTarget.File;
+                     continue;
+                 }
+
+                 if (string.Equals(args[i], "chat", StringComparison.OrdinalIgnoreCase))
+                 {
+                     target = DotDebugOutputTarget.Chat;
+                     continue;
+                 }
+
+                 if (int.TryParse(args[i], out var parsed))
+                     max = parsed;
+             }
+
+             max = target == DotDebugOutputTarget.Chat
+                 ? Math.Clamp(max, 1, 20)
+                 : Math.Clamp(max, 1, 200);
+         }
+
+         internal void PrintDotStats(DotDebugOutputTarget target)
+         {
+             try
+             {
+                 var stats = GetDotCaptureStats();
+
+                 var battle = Battles.Count > 0 ? Battles[^1] : null;
+                 var selfId = DalamudApi.ObjectTable.LocalPlayer?.EntityId ?? 0u;
+                 var selfDotTickDamage = 0L;
+                 var selfDotSimDamage = 0L;
+                 var selfDotTicks = 0;
+                 if (battle != null && selfId != 0)
+                 {
+                     if (battle.DotDamageByActor.TryGetValue(selfId, out var dotDamage))
+                         selfDotTickDamage = dotDamage;
+                     if (battle.DotTickCountByActor.TryGetValue(selfId, out var dotTicks))
+                         selfDotTicks = dotTicks;
+
+                     if (battle.DotDmgList.Count > 0)
+                     {
+                         foreach (var (active, dotDmg) in battle.DotDmgList)
+                         {
+                             if ((uint)(active & 0xFFFFFFFF) == selfId)
+                                 selfDotSimDamage += (long)dotDmg;
+                         }
+                     }
+                 }
+
+                 var selfDotTotalDamage = selfDotTickDamage + selfDotSimDamage;
+
+                 var lines = new List<string>(4)
+                 {
+                     $"[DalamudACT] DoTStats 入队 {stats.EnqueuedTotal}（Legacy {stats.EnqueuedLegacy}, Network {stats.EnqueuedNetwork}） 处理 {stats.Processed} 去重丢弃 {stats.DedupDropped} 非法丢弃 {stats.DroppedInvalid}",
+                     $"[DalamudACT] DoTStats 未知来源 {stats.UnknownSource} buffId=0 {stats.UnknownBuff} 推断src {stats.InferredSource} 推断buff {stats.InferredBuff}",
+                     $"[DalamudACT] DoTStats 归因 Action {stats.AttributedToAction} Status {stats.AttributedToStatus} TotalOnly {stats.AttributedToTotalOnly} 自己Tick {selfDotTicks} Tick伤害 {selfDotTickDamage:N0} 模拟 {selfDotSimDamage:N0} 合计 {selfDotTotalDamage:N0}",
+                 };
+
+                 DotDebugOutput.WriteLines(target, lines);
+
+                 if (target == DotDebugOutputTarget.File)
+                 {
+                     var path = DotDebugOutput.GetFilePath();
+                     if (!string.IsNullOrWhiteSpace(path))
+                         DalamudApi.Log.Information($"[DalamudACT] DoTStats 已写入: {path}");
+                 }
+             }
+             catch (Exception e)
+             {
+                 DalamudApi.Log.Error(e, "[DalamudACT] Failed to print dot stats.");
+             }
+         }
+
+         internal void PrintDotDump(DotDebugOutputTarget target, bool wantAll, int max)
+         {
+             try
+             {
+                 var selfId = DalamudApi.ObjectTable.LocalPlayer?.EntityId ?? 0u;
+
+                 var all = dotCapture.GetRecentEventsSnapshot();
+                 if (all.Length == 0)
+                 {
+                     DotDebugOutput.WriteLine(target, "[DalamudACT] DotDump 暂无事件（可先进入战斗或等待 DoT tick）。");
+                     return;
+                 }
+
+                 var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                 var filtered = new List<DotEventCapture.DotRecentEvent>(all.Length);
+                 foreach (var e in all)
+                 {
+                     if (wantAll)
+                     {
+                         filtered.Add(e);
+                         continue;
+                     }
+
+                     if (selfId != 0 && e.ResolvedSourceId == selfId)
+                         filtered.Add(e);
+                 }
+
+                 if (!wantAll && filtered.Count == 0)
+                 {
+                     DotDebugOutput.WriteLine(target, $"[DalamudACT] DotDump 当前缓存 {all.Length} 条，未命中自己({selfId:X})的 DoT tick。");
+                     return;
+                 }
+
+                 var start = Math.Max(0, filtered.Count - max);
+                 var show = filtered.GetRange(start, filtered.Count - start);
+
+                 var scopeText = wantAll ? "全部" : "自己";
+                 var lines = new List<string>(show.Count + 2)
+                 {
+                     $"[DalamudACT] DotDump {scopeText} 最近 {show.Count}/{filtered.Count} 条（总缓存 {all.Length}，最大输出 {max}）。",
+                 };
+
+                 foreach (var e in show)
+                 {
+                     var ageMs = nowMs - e.TimeMs;
+                     if (ageMs < 0) ageMs = 0;
+
+                     var srcText = e.OriginalSourceId == e.ResolvedSourceId
+                         ? $"{e.ResolvedSourceId:X}"
+                         : $"{e.OriginalSourceId:X}->{e.ResolvedSourceId:X}";
+
+                     var buffText = e.OriginalBuffId == e.ResolvedBuffId
+                         ? $"{e.ResolvedBuffId}"
+                         : $"{e.OriginalBuffId}->{e.ResolvedBuffId}";
+
+                     var attrText = e.Attribution switch
+                     {
+                         DotEventCapture.DotAttributionKind.UnknownSource => $"UnknownSrc({e.AttributionId})",
+                         DotEventCapture.DotAttributionKind.Action => $"Action({e.AttributionId})",
+                         DotEventCapture.DotAttributionKind.Status => $"Status({e.AttributionId})",
+                         DotEventCapture.DotAttributionKind.TotalOnly => "TotalOnly",
+                         _ => "-",
+                     };
+
+                     var dropText = e.DropReason == DotEventCapture.DotDropReason.None ? "" : $" DROP={e.DropReason}";
+
+                     lines.Add($"[DalamudACT] DotDump ago={ageMs}ms ch={e.Channel} src={srcText} tgt={e.OriginalTargetId:X} buff={buffText} dmg={e.Damage} attr={attrText}{dropText}");
+                 }
+
+                 if (target == DotDebugOutputTarget.File)
+                     lines.Add(string.Empty);
+
+                 DotDebugOutput.WriteLines(target, lines);
+
+                 if (target == DotDebugOutputTarget.File)
+                 {
+                     var path = DotDebugOutput.GetFilePath();
+                     if (!string.IsNullOrWhiteSpace(path))
+                         DalamudApi.Log.Information($"[DalamudACT] DotDump 已写入: {path}");
+                 }
+             }
+             catch (Exception e)
+             {
+                 DalamudApi.Log.Error(e, "[DalamudACT] Failed to print dot dump.");
+             }
+         }
+
+         private void DrawUI()
+         {
+             PluginUi.WindowSystem.Draw();
+         }
 
         public void DrawConfigUI()
         {

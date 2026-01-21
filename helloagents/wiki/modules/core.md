@@ -6,7 +6,7 @@
 ## 模块概述
 - **职责**：Hook 回调、ActionEffect 解析、DoT/死亡事件接入、战斗起止与缓存管理
 - **状态**：稳定
-- **最后更新**：2026-01-12
+- **最后更新**：2026-01-21
 
 ## 关键设计
 
@@ -15,13 +15,19 @@
 - `targetCount`：使用 `Header.NumTargets`，按真实目标数遍历（不因 `targetId==0` 提前 break）
 - 每目标解析 8 个 `Effect`，仅统计伤害类 `Type`（Damage/BlockedDamage/ParriedDamage）
 - 技能 ID：优先使用 `Header.SpellId`，为 0 时回退到 `Header.ActionId`
-- 伤害值：`Value` + `Param3 << 16`（当 `Param4 & 0x40` 置位时）
+- 伤害值：`Value | (Param3 << 16)`（对伤害类 effect 直接合并高位，避免依赖 `Param4` 标记位导致 >65535 截断）
 
 ### DoT/死亡事件
 - DoT：由 `ActorControlSelf`（`ActorControlCategory.DoT`）接入
-  - 优先使用事件内 `sourceId`
-  - 失败时使用 `(targetId,buffId)->sourceId` 缓存与扫描目标 `StatusList` 的 `SourceId` 回退
+  - 来源推断：优先扫描目标 `StatusList`（唯一匹配/按伤害匹配），失败再回退 `(targetId,buffId)->sourceId` 缓存；启用 `EnableActLikeAttribution` 时不使用缓存以减少错归因
+  - 目标定位使用 `ObjectTable.SearchByEntityId(targetId)`（DoT 链路传递的是 `EntityId`，避免误用 `SearchById` 导致无法读取 `StatusList`）
+  - 仅接受有效的 DoT 目标（`targetId/entityId` 必须是 `BattleNpc EntityId` 且不为 `0xE0000000`），避免无效包污染统计
+  - DoT 去重覆盖：
+    - 同通道完全重复（窗口 200ms），降低重复回调/重复包导致的 DoT 偏高
+    - `buffId=0` 与 `buffId!=0` 的同通道双事件重复（窗口 800ms，判重使用原始 `buffId`，不受推断补齐影响），避免同一 tick 被统计两次
+    - 跨通道重复（窗口 800ms）：不同通道同 tick 上报时去重；当两侧 `buffId`（原始或推断）均可确定且明确不一致时跳过去重，避免多 DoT 场景误删
   - 无法解析来源时，仍计入 `TotalDotDamage`，并更新 `CalcDot`，避免总伤害偏低
+  - 调试：`/act dotstats`（统计汇总）与 `/act dotdump`（最近 tick 明细）可用于与卫月/ACT 做对照
 - Death：由 `ActorControlSelf`（`ActorControlCategory.Death`）接入，计入 `Data.Death`
 
 ### 玩家建档（避免对象表缺失丢事件）

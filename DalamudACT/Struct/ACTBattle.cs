@@ -20,6 +20,8 @@ public class ACTBattle
     public static ExcelSheet<Status>? StatusSheet;
     private static readonly Dictionary<uint, uint> OwnerCache = new();
     private static readonly object OwnerCacheLock = new();
+    private static long ownerCacheWarmupLastMs;
+    private const int OwnerCacheWarmupIntervalMs = 500;
     //public static readonly Dictionary<uint, uint> Pet = new();
     public readonly Dictionary<uint, long> LimitBreak = new();
 
@@ -32,6 +34,7 @@ public class ACTBattle
     public readonly Dictionary<uint, Data> DataDic = new();
     public readonly Dictionary<long, long> PlayerDotPotency = new();
     public readonly Dictionary<uint, long> DotDamageByActor = new();
+    public readonly Dictionary<uint, int> DotTickCountByActor = new();
     public readonly Dictionary<ulong, uint> DotSourceCache = new();
     public readonly Dictionary<ulong, uint> DotBuffCache = new();
 
@@ -115,8 +118,8 @@ public class ACTBattle
         if (startMs <= 0 || endMs <= 0) return 1f;
         var deltaMs = endMs - startMs;
         if (deltaMs <= 0) return 1f;
-        var seconds = (float)Math.Floor(deltaMs / 1000.0);
-        return seconds <= 0 ? 1f : seconds;
+        var seconds = (float)(deltaMs / 1000.0);
+        return seconds < 1f ? 1f : seconds;
     }
 
     private static float GetJobPotencyMulti(uint jobId)
@@ -395,6 +398,11 @@ public class ACTBattle
             DotDamageByActor[from] += damage;
         else
             DotDamageByActor.Add(from, damage);
+
+        if (DotTickCountByActor.ContainsKey(from))
+            DotTickCountByActor[from]++;
+        else
+            DotTickCountByActor.Add(from, 1);
     }
 
     private void CalcDot()
@@ -496,11 +504,13 @@ public class ACTBattle
 
     private bool CheckTargetDot(uint id)
     {
+        if (id == 0xE0000000) return false;
+
         ActiveDots.Clear();
-        var target = DalamudApi.ObjectTable.SearchById(id);
+        var target = DalamudApi.ObjectTable.SearchByEntityId(id);
         if (target == null || target.ObjectKind != ObjectKind.BattleNpc)
         {
-            DalamudApi.Log.Error($"Dot target {id:X} is not BattleNpc");
+            DalamudApi.Log.Verbose($"Dot target {id:X} is not BattleNpc");
             return false;
         }
 
@@ -540,6 +550,40 @@ public class ACTBattle
 
     public static uint GetOwner(uint id) => DalamudApi.ObjectTable.SearchByEntityId(id)?.OwnerId ?? 0xE000_0000;
 
+    public static void WarmOwnerCacheFromObjectTable(long nowMs = 0)
+    {
+        if (nowMs <= 0) nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        lock (OwnerCacheLock)
+        {
+            if (nowMs - ownerCacheWarmupLastMs < OwnerCacheWarmupIntervalMs) return;
+            ownerCacheWarmupLastMs = nowMs;
+        }
+
+        List<(uint EntityId, uint OwnerId)> entries = new();
+        foreach (var obj in DalamudApi.ObjectTable)
+        {
+            if (obj == null) continue;
+
+            var entityId = obj.EntityId;
+            if (entityId is 0 or <= 0x4000_0000) continue;
+
+            var ownerId = obj.OwnerId;
+            if (ownerId is 0 or > 0x4000_0000) continue;
+
+            entries.Add((entityId, ownerId));
+        }
+
+        if (entries.Count == 0) return;
+        lock (OwnerCacheLock)
+        {
+            foreach (var (entityId, ownerId) in entries)
+            {
+                OwnerCache[entityId] = ownerId;
+            }
+        }
+    }
+
     public static void ClearOwnerCache()
     {
         lock (OwnerCacheLock)
@@ -573,7 +617,7 @@ public class ACTBattle
         source = 0;
         if (buffId == 0) return false;
 
-        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
         if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
 
         uint matchedSource = 0;
@@ -596,7 +640,7 @@ public class ACTBattle
         buffId = 0;
         if (sourceId == 0 || sourceId > 0x40000000) return false;
 
-        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
         if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
 
         uint matchedBuff = 0;
@@ -619,7 +663,7 @@ public class ACTBattle
     {
         buffId = 0;
 
-        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
         if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
 
         uint matchedBuff = 0;
@@ -643,7 +687,7 @@ public class ACTBattle
         buffId = 0;
         if (damage <= 0) return false;
 
-        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
         if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
 
         var dotPot = DotPot();
@@ -733,7 +777,7 @@ public class ACTBattle
         var dpp = DPP(sourceId);
         if (dpp <= 0) return false;
 
-        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
         if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
 
         var dotPot = DotPot();
@@ -780,13 +824,82 @@ public class ACTBattle
         return true;
     }
 
+    public bool TryResolveDotSourceByDamage(uint targetId, uint buffId, long damage, out uint sourceId)
+    {
+        sourceId = 0;
+        if (buffId == 0) return false;
+        if (damage <= 0) return false;
+
+        var dotPot = DotPot();
+        if (!dotPot.TryGetValue(buffId, out var potency)) return false;
+
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
+        if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
+
+        var sources = new HashSet<uint>();
+        foreach (var status in ((IBattleNpc)target).StatusList)
+        {
+            if (status.StatusId != buffId) continue;
+            var resolved = ResolveOwner(status.SourceId);
+            if (resolved is 0 or > 0x4000_0000) continue;
+            sources.Add(resolved);
+        }
+
+        if (sources.Count == 0) return false;
+        if (sources.Count == 1)
+        {
+            sourceId = sources.First();
+            return true;
+        }
+
+        var knownDpp = new List<float>();
+        foreach (var src in sources)
+        {
+            EnsurePlayer(src);
+            var dpp = DPP(src);
+            if (dpp > 0) knownDpp.Add(dpp);
+        }
+
+        var fallbackDpp = knownDpp.Count > 0 ? knownDpp.Average() : 1f;
+
+        var bestError = float.PositiveInfinity;
+        var secondError = float.PositiveInfinity;
+        uint bestSource = 0;
+        foreach (var src in sources)
+        {
+            var dpp = DPP(src);
+            if (dpp <= 0) dpp = fallbackDpp;
+            if (dpp <= 0) continue;
+
+            var basePred = dpp * potency;
+            var err = BestDotTickRelativeError(basePred, damage);
+            if (err < bestError)
+            {
+                secondError = bestError;
+                bestError = err;
+                bestSource = src;
+            }
+            else if (err < secondError)
+            {
+                secondError = err;
+            }
+        }
+
+        const float maxError = 0.18f;
+        const float minSeparation = 0.05f;
+        if (bestSource == 0 || bestError > maxError || secondError - bestError < minSeparation) return false;
+
+        sourceId = bestSource;
+        return true;
+    }
+
     public bool TryResolveDotPairByDamage(uint targetId, long damage, out uint sourceId, out uint buffId)
     {
         sourceId = 0;
         buffId = 0;
         if (damage <= 0) return false;
 
-        var target = DalamudApi.ObjectTable.SearchById(targetId);
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
         if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
 
         var dotPot = DotPot();

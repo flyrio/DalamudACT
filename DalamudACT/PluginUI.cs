@@ -534,6 +534,8 @@ internal class PluginUI : IDisposable
 
                 if (ImGui.CollapsingHeader("DoT", ImGuiTreeNodeFlags.DefaultOpen))
                 {
+                    changed |= ImGui.Checkbox("启用 ACTLike 归因（备选：DoT/召唤物）", ref config.EnableActLikeAttribution);
+                    ImGui.TextDisabled("用于复杂场景对齐 ACT：更严格的 DoT 归因/更少漏算；默认关闭以保持现有口径。");
                     changed |= ImGui.Checkbox("启用 DoT 增强归因（buffId 推断/技能明细）", ref config.EnableEnhancedDotCapture);
                     changed |= ImGui.Checkbox("启用 DoT 诊断日志/计数", ref config.EnableDotDiagnostics);
 
@@ -545,6 +547,24 @@ internal class PluginUI : IDisposable
                     ImGui.Text($"归因：Action {stats.AttributedToAction}，Status {stats.AttributedToStatus}，TotalOnly {stats.AttributedToTotalOnly}");
                     if (ImGui.SmallButton("清空 DoT 去重缓存"))
                         _plugin.ResetDotCaptureCaches();
+
+                    ImGui.Separator();
+                    ImGui.TextDisabled("调试输出（不占用聊天栏）：");
+
+                    if (ImGui.SmallButton("写入日志: DoTStats"))
+                        _plugin.PrintDotStats(DotDebugOutputTarget.DalamudLog);
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("写入日志: DotDump(all 20)"))
+                        _plugin.PrintDotDump(DotDebugOutputTarget.DalamudLog, wantAll: true, max: 20);
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("导出文件: DotDump(all 20)"))
+                        _plugin.PrintDotDump(DotDebugOutputTarget.File, wantAll: true, max: 20);
+
+                    var debugFilePath = DotDebugOutput.GetFilePath();
+                    if (string.IsNullOrWhiteSpace(debugFilePath))
+                        ImGui.TextDisabled("dot-debug.log: （无法获取插件配置目录）");
+                    else
+                        ImGui.TextDisabled($"dot-debug.log: {debugFilePath}");
                 }
 
                 if (changed) config.Save();
@@ -1451,6 +1471,9 @@ internal class PluginUI : IDisposable
                         long dotTickDamage = 0;
                         if (battle.DotDamageByActor.TryGetValue(hoveredActor, out var dotDamage))
                             dotTickDamage = dotDamage;
+                        var dotTickCount = 0;
+                        if (dotTickDamage > 0 && battle.DotTickCountByActor.TryGetValue(hoveredActor, out var dotTicks))
+                            dotTickCount = dotTicks;
 
                         long dotSimDamage = 0;
                         if (canSimDots && battle.DotDmgList.Count > 0)
@@ -1507,6 +1530,8 @@ internal class PluginUI : IDisposable
                                         ? "来源: 模拟"
                                         : "来源: Tick";
                             ImGui.TextColored(SecondaryTextColor, dotSourceText);
+                            if (dotTickCount > 0)
+                                ImGui.TextColored(SecondaryTextColor, $"DOT tick {dotTickCount:D}");
                         }
                             if (dotSimDamage > 0)
                                 ImGui.TextColored(SecondaryTextColor, $"技能合计 {baseTotalDamage:N0}");
