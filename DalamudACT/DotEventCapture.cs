@@ -330,6 +330,11 @@ internal sealed class DotEventCapture
             sourceId = resolvedOwner;
         }
 
+        // 防御性处理：部分环境下 sourceId 可能为极小常量（非有效 ActorId），避免将 DoT 错归因到“幽灵实体”。
+        // 仅在明显异常时归零，后续可通过状态表/缓存推断来源。
+        if (sourceId is > 0 and < 0x0001_0000)
+            sourceId = 0;
+
         var buffId = evt.BuffId;
         var damage = (long)evt.Damage;
 
@@ -385,17 +390,28 @@ internal sealed class DotEventCapture
             }
         }
 
-        if (config.EnableActLikeAttribution && config.EnableEnhancedDotCapture && buffId == 0 && (sourceId == 0 || sourceId > 0x4000_0000))
+        // 二次来源推断：当报文缺失 buffId 但后续推断补齐后，若 sourceId 仍未知，则再尝试解析来源。
+        // 该分支不按伤害“强行推断来源”，仅在目标状态表能唯一确定来源时才补齐（避免错归因扩大）。
+        if (originalBuffId == 0 && (sourceId == 0 || sourceId > 0x4000_0000) && buffId != 0)
         {
-            if (battle.TryResolveDotPairByDamage(targetId, damage, out var resolvedSource, out var resolvedBuff))
+            if (battle.TryResolveDotSource(targetId, buffId, out var resolvedSource) && resolvedSource != 0)
             {
                 sourceId = resolvedSource;
-                buffId = resolvedBuff;
                 lock (gate)
-                {
                     inferredSource++;
-                    inferredBuff++;
-                }
+            }
+        }
+
+        // 防御性校验：当 buffId 可确定且状态表能唯一给出来源时，以状态表为准，修正可能错误的 sourceId。
+        if (buffId != 0 && sourceId is > 0 and <= 0x4000_0000)
+        {
+            if (battle.TryResolveDotSource(targetId, buffId, out var statusSource) &&
+                statusSource is > 0 and <= 0x4000_0000 &&
+                statusSource != sourceId)
+            {
+                sourceId = statusSource;
+                lock (gate)
+                    inferredSource++;
             }
         }
 

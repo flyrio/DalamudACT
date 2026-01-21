@@ -1,6 +1,8 @@
 // ACT 插件入口与事件 Hook，负责战斗事件采集与统计更新。
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
 using System.Runtime.InteropServices;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.Command;
@@ -72,19 +74,60 @@ namespace DalamudACT
 
         #region OPcode & Hook functions
 
-        private unsafe void Ability(ActionEffectHandler.Header* header, ActionEffectHandler.TargetEffects* effects, GameObjectId* targets, uint sourceId)
-        {
-            var length = header->NumTargets;
-            if (length == 0) return;
+         private unsafe void Ability(ActionEffectHandler.Header* header, ActionEffectHandler.TargetEffects* effects, GameObjectId* targets, uint sourceId)
+         {
+             var length = header->NumTargets;
+             if (length == 0) return;
 
-            DalamudApi.Log.Verbose($"-----------------------Ability{length}:{sourceId:X}------------------------------");
+             DalamudApi.Log.Verbose($"-----------------------Ability{length}:{sourceId:X}------------------------------");
 
-            var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+             var eventTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-            var originalSourceId = sourceId;
-            if (sourceId > 0x40000000 && sourceId != 0xE0000000)
-            {
-                sourceId = ACTBattle.ResolveOwner(sourceId);
+             var actionId = header->SpellId != 0 ? (uint)header->SpellId : header->ActionId;
+
+             // Network DoT tick：在某些环境/设置下，ActorControlSelf 可能无法覆盖全部 DoT（尤其是他人/召唤物/地面 DoT）。
+             // 当 ActionEffect 的 sourceId 为 0xE0000000 时，将其作为“未知来源 DoT tick”入队，交由 DotEventCapture 统一归因与去重。
+             if (sourceId == 0xE000_0000)
+             {
+                 var isDotLike = actionId != 0 &&
+                                 (Potency.DotPot.ContainsKey(actionId) ||
+                                  Potency.DotPot94.ContainsKey(actionId) ||
+                                  Potency.BuffToAction.ContainsKey(actionId));
+                 if (!isDotLike)
+                     return;
+
+                 lock (SyncRoot)
+                 {
+                     for (var i = 0; i < length; i++)
+                     {
+                         var targetId = (uint)(targets[i] & uint.MaxValue);
+                         if (targetId == 0) continue;
+
+                         for (var j = 0; j < 8; j++)
+                         {
+                             ref var effect = ref effects[i].Effects[j];
+                             if (effect.Type is 3 or 5 or 6) // Damage / Blocked / Parried
+                             {
+                                 var damage = (uint)effect.Value | ((uint)effect.Param3 << 16);
+                                 dotCapture.Enqueue(new DotTickEvent(
+                                     eventTimeMs,
+                                     sourceId,
+                                     targetId,
+                                     buffId: actionId,
+                                     damage: damage,
+                                     DotTickChannel.NetworkActorControlSelf));
+                             }
+                         }
+                     }
+                 }
+
+                 return;
+             }
+
+             var originalSourceId = sourceId;
+             if (sourceId > 0x40000000 && sourceId != 0xE0000000)
+             {
+                 sourceId = ACTBattle.ResolveOwner(sourceId);
                 if (sourceId == 0xE0000000 && originalSourceId != 0xE0000000 && Configuration.EnableActLikeAttribution)
                 {
                     ACTBattle.WarmOwnerCacheFromObjectTable(eventTimeMs);
@@ -95,12 +138,10 @@ namespace DalamudACT
             if (sourceId == 0xE0000000 && originalSourceId != 0xE0000000) return;
             if (sourceId is > 0x40000000 or 0x0) return;
 
-            var actionId = header->SpellId != 0 ? (uint)header->SpellId : header->ActionId;
-
-            lock (SyncRoot)
-            {
-                for (var i = 0; i < length; i++)
-                {
+             lock (SyncRoot)
+             {
+                 for (var i = 0; i < length; i++)
+                 {
                     var targetId = (uint)(targets[i] & uint.MaxValue);
                     if (targetId == 0) continue;
 
@@ -347,7 +388,7 @@ namespace DalamudACT
 
               DalamudApi.Commands.AddHandler("/act", new CommandInfo(OnCommand)
               {
-                 HelpMessage = "/act 开关独立名片\n/act config 打开设置窗口\n/act prev 查看上一场\n/act next 查看下一场\n/act clear 清空战斗记录\n/act dotstats [log|file] 输出 DoT 采集统计（调试）\n/act dotdump [log|file] [all] [N] 输出最近 DoT tick 事件（调试）"
+                 HelpMessage = "/act 开关独立名片\n/act config 打开设置窗口\n/act prev 查看上一场\n/act next 查看下一场\n/act clear 清空战斗记录\n/act stats [log|file] [N] 导出战斗统计快照（调试/对齐 ACT）\n/act dotstats [log|file] 输出 DoT 采集统计（调试）\n/act dotdump [log|file] [all] [N] 输出最近 DoT tick 事件（调试）"
               });
 
             DalamudApi.PluginInterface.UiBuilder.Draw += DrawUI;
@@ -450,11 +491,15 @@ namespace DalamudACT
                   case "dotstats":
                       PrintDotStats(ParseDotDebugTarget(parts, defaultTarget: DotDebugOutputTarget.Chat));
                       break;
+                  case "stats":
+                      ParseBattleStatsArgs(parts, out var statsTarget, out var top);
+                      PrintBattleStats(statsTarget, top);
+                      break;
                   case "dotdump":
                       ParseDotDumpArgs(parts, out var dumpTarget, out var wantAll, out var max);
                       PrintDotDump(dumpTarget, wantAll, max);
                       break;
-              }
+               }
           }
 
          private static DotDebugOutputTarget ParseDotDebugTarget(string[] args, DotDebugOutputTarget defaultTarget)
@@ -483,46 +528,199 @@ namespace DalamudACT
              return target;
          }
 
-         private static void ParseDotDumpArgs(string[] args, out DotDebugOutputTarget target, out bool wantAll, out int max)
-         {
-             target = DotDebugOutputTarget.Chat;
-             wantAll = false;
-             max = 10;
+          private static void ParseDotDumpArgs(string[] args, out DotDebugOutputTarget target, out bool wantAll, out int max)
+          {
+              target = DotDebugOutputTarget.Chat;
+              wantAll = false;
+              max = 10;
 
-             for (var i = 1; i < args.Length; i++)
-             {
-                 if (string.Equals(args[i], "all", StringComparison.OrdinalIgnoreCase))
-                 {
-                     wantAll = true;
-                     continue;
-                 }
+              for (var i = 1; i < args.Length; i++)
+              {
+                  if (string.Equals(args[i], "all", StringComparison.OrdinalIgnoreCase))
+                  {
+                      wantAll = true;
+                      continue;
+                  }
 
-                 if (string.Equals(args[i], "log", StringComparison.OrdinalIgnoreCase))
-                 {
-                     target = DotDebugOutputTarget.DalamudLog;
-                     continue;
-                 }
+                  if (string.Equals(args[i], "log", StringComparison.OrdinalIgnoreCase))
+                  {
+                      target = DotDebugOutputTarget.DalamudLog;
+                      continue;
+                  }
 
-                 if (string.Equals(args[i], "file", StringComparison.OrdinalIgnoreCase))
-                 {
-                     target = DotDebugOutputTarget.File;
-                     continue;
-                 }
+                  if (string.Equals(args[i], "file", StringComparison.OrdinalIgnoreCase))
+                  {
+                      target = DotDebugOutputTarget.File;
+                      continue;
+                  }
 
-                 if (string.Equals(args[i], "chat", StringComparison.OrdinalIgnoreCase))
-                 {
-                     target = DotDebugOutputTarget.Chat;
-                     continue;
-                 }
+                  if (string.Equals(args[i], "chat", StringComparison.OrdinalIgnoreCase))
+                  {
+                      target = DotDebugOutputTarget.Chat;
+                      continue;
+                  }
 
-                 if (int.TryParse(args[i], out var parsed))
-                     max = parsed;
-             }
+                  if (int.TryParse(args[i], out var parsed))
+                      max = parsed;
+              }
 
-             max = target == DotDebugOutputTarget.Chat
-                 ? Math.Clamp(max, 1, 20)
-                 : Math.Clamp(max, 1, 200);
-         }
+              max = target == DotDebugOutputTarget.Chat
+                  ? Math.Clamp(max, 1, 20)
+                  : Math.Clamp(max, 1, 200);
+          }
+
+          private static void ParseBattleStatsArgs(string[] args, out BattleStatsOutputTarget target, out int top)
+          {
+              target = BattleStatsOutputTarget.File;
+              top = 0; // 0=全部
+
+              for (var i = 1; i < args.Length; i++)
+              {
+                  if (string.Equals(args[i], "log", StringComparison.OrdinalIgnoreCase))
+                  {
+                      target = BattleStatsOutputTarget.DalamudLog;
+                      continue;
+                  }
+
+                  if (string.Equals(args[i], "file", StringComparison.OrdinalIgnoreCase))
+                  {
+                      target = BattleStatsOutputTarget.File;
+                      continue;
+                  }
+
+                  if (string.Equals(args[i], "chat", StringComparison.OrdinalIgnoreCase))
+                  {
+                      target = BattleStatsOutputTarget.Chat;
+                      continue;
+                  }
+
+                  if (int.TryParse(args[i], out var parsed))
+                      top = parsed;
+              }
+
+              top = Math.Clamp(top, 0, 200);
+          }
+
+          internal void PrintBattleStats(BattleStatsOutputTarget target, int topN)
+          {
+              try
+              {
+                  ACTBattle? battle = null;
+                  lock (SyncRoot)
+                  {
+                      for (var i = Battles.Count - 1; i >= 0; i--)
+                      {
+                          var b = Battles[i];
+                          if (b.StartTime != 0 || b.EndTime != 0 || b.DataDic.Count != 0 || b.TotalDotDamage != 0)
+                          {
+                              battle = b;
+                              break;
+                          }
+                      }
+                  }
+
+                  if (battle == null)
+                  {
+                      BattleStatsOutput.WriteLine(target, "[DalamudACT] BattleStats: (no battle)");
+                      return;
+                  }
+
+                  var canSimDots = battle.Level is >= 64 && !float.IsInfinity(battle.TotalDotSim) && battle.TotalDotSim != 0;
+
+                  var dotByActor = new Dictionary<uint, float>();
+                  if (canSimDots && battle.TotalDotDamage > 0 && battle.DotDmgList.Count > 0)
+                  {
+                      foreach (var (active, dotDmg) in battle.DotDmgList)
+                      {
+                          var source = (uint)(active & 0xFFFFFFFF);
+                          dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                      }
+                  }
+
+                  var actors = new List<Dictionary<string, object?>>(battle.DataDic.Count);
+                  foreach (var (actorId, data) in battle.DataDic)
+                  {
+                      var baseDamage = data.Damages.TryGetValue(0, out var total) ? total.Damage : 0L;
+                      var dotSimDamage = dotByActor.TryGetValue(actorId, out var sim) ? (long)sim : 0L;
+                      var totalDamage = baseDamage + dotSimDamage;
+                      var activeSeconds = battle.ActorDuration(actorId);
+                      var encSeconds = battle.Duration();
+
+                      var name = battle.Name.TryGetValue(actorId, out var n) ? n : string.Empty;
+
+                      var encDps = encSeconds <= 0 ? 0d : totalDamage / (double)encSeconds;
+                      var dps = activeSeconds <= 0 ? 0d : totalDamage / (double)activeSeconds;
+
+                      actors.Add(new Dictionary<string, object?>
+                      {
+                          ["actorId"] = $"0x{actorId:X8}",
+                          ["name"] = name,
+                          ["jobId"] = data.JobId,
+                          ["baseDamage"] = baseDamage,
+                          ["dotSimDamage"] = dotSimDamage,
+                          ["totalDamage"] = totalDamage,
+                          ["encdps"] = encDps,
+                          ["dps"] = dps,
+                          ["activeSeconds"] = activeSeconds,
+                      });
+                  }
+
+                  if (actors.Count > 1)
+                      actors.Sort((a, b) => Convert.ToInt64(b["totalDamage"]).CompareTo(Convert.ToInt64(a["totalDamage"])));
+
+                  if (topN > 0 && actors.Count > topN)
+                      actors = actors.GetRange(0, topN);
+
+                  var actorDamageTotal = 0L;
+                  foreach (var a in actors)
+                      actorDamageTotal += Convert.ToInt64(a["totalDamage"]);
+
+                  var totalDamageAll = actorDamageTotal;
+                  if (battle.TotalDotDamage != 0 && !canSimDots)
+                      totalDamageAll += battle.TotalDotDamage;
+
+                  var payload = new Dictionary<string, object?>
+                  {
+                      ["utc"] = DateTimeOffset.UtcNow.ToString("O"),
+                      ["zone"] = battle.Zone ?? "Unknown",
+                      ["level"] = battle.Level,
+                      ["startTimeMs"] = battle.StartTime,
+                      ["endTimeMs"] = battle.EndTime,
+                      ["durationSeconds"] = battle.Duration(),
+                      ["dpsTimeMode"] = Configuration.DpsTimeMode,
+                      ["canSimDots"] = canSimDots,
+                      ["totalDotDamage"] = battle.TotalDotDamage,
+                      ["totalDotSim"] = battle.TotalDotSim,
+                      ["limitBreakDamage"] = battle.LimitBreak.Count > 0 ? battle.LimitBreak.Values.Sum() : 0L,
+                      ["totalDamageAll"] = totalDamageAll,
+                      ["actors"] = actors,
+                  };
+
+                  var json = JsonSerializer.Serialize(payload);
+
+                  if (target == BattleStatsOutputTarget.Chat)
+                  {
+                      BattleStatsOutput.WriteLine(target, $"[DalamudACT] BattleStats: {battle.Zone ?? "Unknown"} {battle.Duration():F1}s participants={battle.DataDic.Count}");
+                      BattleStatsOutput.WriteLine(target, $"[DalamudACT] BattleStats: 请使用 /act stats file 导出 JSON（聊天栏不输出完整 JSON）。");
+                      return;
+                  }
+
+                  BattleStatsOutput.WriteLine(target, json);
+
+                  if (target == BattleStatsOutputTarget.File)
+                  {
+                      var path = BattleStatsOutput.GetFilePath();
+                      if (!string.IsNullOrWhiteSpace(path))
+                          DalamudApi.Log.Information($"[DalamudACT] BattleStats 已写入: {path}");
+                  }
+              }
+              catch (Exception e)
+              {
+                  DalamudApi.Log.Error(e, "[DalamudACT] Failed to print battle stats.");
+              }
+          }
+
+
 
          internal void PrintDotStats(DotDebugOutputTarget target)
          {

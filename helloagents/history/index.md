@@ -22,6 +22,8 @@
 | 202601210310 | dot_tick_dedup_fix | 轻量迭代 | 已完成 | [link](2026-01/202601210310_dot_tick_dedup_fix/) |
 | 202601211751 | dot_debug_log | 轻量迭代 | 已完成 | [link](2026-01/202601211751_dot_debug_log/) |
 | 202601220013 | default_encdps | 轻量迭代 | 已完成 | [link](2026-01/202601220013_default_encdps/) |
+| 202601220232 | act_mcp_bridge | 标准开发 | 已完成 | [link](2026-01/202601220232_act_mcp_bridge/) |
+| 202601220240 | dot_attribution_fix | 标准开发 | 已完成 | [link](2026-01/202601220240_dot_attribution_fix/) |
 
 ## 按月
 
@@ -42,3 +44,5 @@
 - [202601210310_dot_tick_dedup_fix](2026-01/202601210310_dot_tick_dedup_fix/) - 修复 DoT tick 同通道双事件去重
 - [202601211751_dot_debug_log](2026-01/202601211751_dot_debug_log/) - DoT 调试输出写入卫月日志/文件
 - [202601220013_default_encdps](2026-01/202601220013_default_encdps/) - 默认 DPS 口径调整为 ENCDPS
+- [202601220232_act_mcp_bridge](2026-01/202601220232_act_mcp_bridge/) - ACT.DieMoe MCP 通讯桥（ACT 插件 + MCP stdio server）
+- [202601220240_dot_attribution_fix](2026-01/202601220240_dot_attribution_fix/) - DoT 归因：缺失 sourceId/buffId 场景修复

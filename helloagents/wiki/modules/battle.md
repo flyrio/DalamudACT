@@ -22,6 +22,7 @@
 
 ### DoT 处理（tick 采集与归因）
 - **入口**：`ACT2.ReceiveActorControlSelf` 捕获 DoT tick → `DotEventCapture` 统一排队与去重 → `ACTBattle` 写入统计
+- **补充入口（Network）**：当 `ActionEffectHandler.Receive` 的 `sourceId==0xE0000000` 且 `actionId` 命中 DoT 状态表时，视为“未知来源 DoT tick”入队（`DotTickChannel.NetworkActorControlSelf`），用于覆盖 ActorControlSelf 不完整/不可见的场景，并依赖 `DotEventCapture` 的跨通道去重避免翻倍
 - **已知来源 DoT**：
   - 总伤害：计入来源玩家总伤害（`AddEvent`/`AddDotDamage`），并刷新个人活跃时长
   - Tick 统计：累计到 `DotDamageByActor` / `DotTickCountByActor`（Tooltip 的 Tick 部分）
@@ -33,7 +34,7 @@
   - 始终计入 `TotalDotDamage`（即使无法读取目标状态列表）
   - 若可读取目标状态：结合 `(targetId,buffId)->sourceId` 缓存与目标身上同 `buffId` 的 `SourceId` 推断/分配，并通过 `CalcDot` 更新 `DotDmgList`
   - 若不可读取目标状态：仍触发 `CalcDot` 以保持 `TotalDotDamage` 与分配结果一致，避免总伤害偏低
-- **未知来源 DoT（按伤害匹配）**：当 tick 同时缺失 `sourceId` 与 `buffId` 时，启用增强归因后仅推断 `buffId`（优先唯一状态，其次按伤害匹配），不推断来源；失败则回退到模拟分配
+- **未知来源 DoT（按伤害匹配）**：当 tick 同时缺失 `sourceId` 与 `buffId` 时，启用增强归因后仅推断 `buffId`（优先唯一状态，其次按伤害匹配），不按伤害强行推断来源；若推断出 `buffId` 后目标状态表能唯一给出来源，则补齐 `sourceId`，否则回退到模拟分配
 - **去重口径**：
   - 同通道完全重复：过滤重复回调/重复包（窗口 200ms）
   - 跨通道重复：Legacy/Network 双通道重复时丢弃（窗口 800ms）；当两侧 `buffId`（原始或推断）均可确定且明确不一致时跳过去重，避免不同 DoT 同伤害误删
@@ -46,6 +47,9 @@
   - 命令 `/act dotdump [log|file] [all] [N]`：输出最近 DoT tick 事件（含去重/归因），用于定位错归因/重复统计
     - 默认输出到聊天栏；`log` 写入 `dalamud.log`；`file` 导出到 `pluginConfigs/DalamudACT/dot-debug.log`
   - 设置窗口 → DoT：提供按钮一键写入日志/导出文件（不占用聊天栏）
+  - 命令 `/act stats [log|file] [N]`：导出当前战斗统计快照（JSON），用于与 ACT 对照
+    - `file`：写入 `pluginConfigs/DalamudACT/battle-stats.jsonl`（推荐，便于 MCP/脚本读取）
+    - `log`：写入 `dalamud.log`（单行 JSON）
 
 ### 备选模式：ACTLike 归因（DoT/召唤物）
 - **开关**：配置 `EnableActLikeAttribution`（设置窗口 → DoT）

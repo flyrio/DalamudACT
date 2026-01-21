@@ -18,7 +18,7 @@
 - 新增：PotencyUpdater 支持从 ff14mcp 同步 DotPot（`--ff14mcp-dots`）
 - 更新：7.4 DoT 数据集（ff14-mcp）并同步 DotPot
 - 优化：DoT tick `buffId=0` 且同源多 DoT 时按伤害匹配推断（`TryResolveDotBuffByDamage`）
-- 优化：DoT tick 同时缺失 `sourceId`/`buffId` 时按伤害匹配推断（`TryResolveDotPairByDamage`），失败回退到模拟分配
+- 修复：DoT tick 同时缺失 `sourceId`/`buffId` 时不再按伤害推断来源（移除 `TryResolveDotPairByDamage` 调用），改为先推断 `buffId`，再仅在状态表唯一时补齐来源
 - 优化：`CalcDot` 在 DPP 不就绪时使用 fallback，避免 DoT 分配长时间不变动
 - 修复：统计丢事件导致总伤害偏低（计入门槛放宽、PartyList 兜底建档、未知来源 DoT 无法扫描仍计入）
 - 修复：参考 DeathBuffTracker，ActionEffect 改用 `ActionEffectHandler.Receive` 的签名与结构体解析，减少漏算与版本漂移
@@ -32,3 +32,8 @@
 - 新增：设置窗口 → DoT：一键写入日志/导出文件（不占用聊天栏）
 - 优化：未知来源 DoT 仅推断 `buffId` 用于模拟分配，不再强行推断来源
 - 优化：未开启“ACTLike 归因”时，DoT tick 来源推断默认优先扫描目标 `StatusList`，失败再回退缓存，减少缓存过期导致的错归因
+- 新增：ACT.DieMoe MCP 通讯桥（ACT 插件 + MCP stdio server + Named Pipe IPC）
+- 新增：ACT MCP `act_status` 附带当前遭遇快照（Top combatants：damage/encdps/dps），便于与 Dalamud 侧对齐
+- 新增：ACT MCP `act_notify` 支持 `mcp:stats [top=N]` 触发一次性遭遇统计输出（配合 `act_log_tail` 拉取）
+- 新增：`/act stats [log|file] [N]` 导出战斗统计快照（JSON），写入 `pluginConfigs/DalamudACT/battle-stats.jsonl` 便于 MCP/脚本对照 ACT
+- 修复/对齐：补充 Network DoT tick 入口（ActionEffect `sourceId=0xE0000000`），与 Legacy 通道去重后归入 `DotEventCapture`，减少“不可见 DoT”导致的漏算
