@@ -36,4 +36,13 @@
 - 新增：ACT MCP `act_status` 附带当前遭遇快照（Top combatants：damage/encdps/dps），便于与 Dalamud 侧对齐
 - 新增：ACT MCP `act_notify` 支持 `mcp:stats [top=N]` 触发一次性遭遇统计输出（配合 `act_log_tail` 拉取）
 - 新增：`/act stats [log|file] [N]` 导出战斗统计快照（JSON），写入 `pluginConfigs/DalamudACT/battle-stats.jsonl` 便于 MCP/脚本对照 ACT
+- 新增：`/act stats local|act|both ...` 支持强制本地/ACT/双快照导出（`both` 输出同一个 `pairId` 便于脚本对比）
+- 变更：战斗结束自动导出固定为本地口径（`source=local`），保证无 ACT 环境可用
 - 修复/对齐：补充 Network DoT tick 入口（ActionEffect `sourceId=0xE0000000`），与 Legacy 通道去重后归入 `DotEventCapture`，减少“不可见 DoT”导致的漏算
+- 修复/对齐：遭遇开始/结束口径对齐 ACT `ActiveEncounter`（战斗事件驱动计时 + 5s 失活超时），不再依赖本地 `InCombat` 分段
+- 修复/对齐：`ActionEffect` 检测到 damage-like effect 时也推进遭遇计时（仅更新 Start/Last/End，不写入玩家伤害），避免只剩敌方动作时过早分段
+- 修复/对齐：`/act stats both file` 改为读取“战斗快照”避免并发不一致；当 ACT 快照不可用时 `file` 输出 JSON 诊断行，保证 `battle-stats.jsonl` 可持续解析
+- 修复：`ResolveOwner` 优先对象表实时 owner（缺失回退缓存），降低 entityId 复用/缓存导致的召唤物错归因
+- 新增：战斗结束自动导出 `battle-stats.jsonl`（`AutoExportBattleStatsOnEnd`）并提供设置窗口开关与“立即导出”按钮
+- 新增：可选 ACT MCP 同步（`EnableActMcpSync` + `PreferActMcpTotals` + `ActMcpPipeName`），UI/导出可直接采用 ACT combatant 口径对齐总伤害/ENCDPS
+- 修复：ACT MCP 返回中出现 `NaN/Infinity` 时的 JSON 解析失败（服务端读取侧清洗；插件侧也对 `EncDPS/DPS` 做有限值兜底）

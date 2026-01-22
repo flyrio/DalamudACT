@@ -6,19 +6,41 @@
 ## 模块概述
 - **职责**：维护 `ACTBattle`（遭遇）内的伤害/死亡/DoT 统计与持续时间口径
 - **状态**：稳定
-- **最后更新**：2026-01-21
+- **最后更新**：2026-01-22
 
 ## 关键设计
 
 ### DPS 口径（对齐 ACT）
 - **ENCDPS**：`Damage / EncounterDuration`（战斗时长）
 - **DPS**：`Damage / CombatantDuration`（个人活跃时长：该玩家首末次造成伤害的时间窗）
-- **EncounterDuration**：`StartTime`（首个事件）到 `EndTime`（末个事件）的事件驱动毫秒时间，避免帧级计时偏差
+- **EncounterDuration**：对齐 ACT 的“结束延迟”表现：
+  - 进行中遭遇：`EndTime = LastEventTime + Timeout`（预计结束时刻）
+  - 同时使用 `EffectiveStartTime = StartTime + (EndTime - LastEventTime)` 做对齐，使得 `Duration = EndTime - EffectiveStartTime == LastEventTime - StartTime`，不包含延迟窗口
+  - 遭遇结束后：`EndTime` 固化到 `LastEventTime`，`EffectiveStartTime` 回退为 `StartTime`
+
+### 遭遇生命周期（对齐 ACT ActiveEncounter）
+- 不再以本地 `ConditionFlag.InCombat` 作为遭遇结束依据
+- 遭遇结束条件：`now - LastEventTime > 5000ms`（失活超时）
+- 计时推进由“战斗事件”驱动（对齐 ACT：避免只剩敌方动作时过早分段）：
+  - `ActionEffect` 中检测到 **damage-like effect** 时，先调用 `MarkEncounterActivityOnly` 推进 `StartTime/LastEventTime/EndTime`（即使来源不可归因或非玩家，也只推进计时，不写入任何玩家伤害）
+  - 真正计入统计的事件仍通过 `AddEvent` / DoT tick flush 写入伤害，并同步推进计时
+
+### 可选：ACT MCP 同步（对齐总伤害/ENCDPS）
+- **目的**：当本地统计在大规模战斗/特殊对象/召唤物归因等场景下与 ACT 存在偏差时，可直接以 ACT 口径作为权威来源，保证 UI/导出对齐
+- **数据来源**：通过 `ActMcpPipeName`（默认 `act-diemoe-mcp`）调用 ACT MCP 的 `act/status`，并将遭遇快照写入 `ACTBattle.ActEncounter`
+- **生效条件**：启用 `EnableActMcpSync` 且勾选 `PreferActMcpTotals`
+- **行为**：
+  - UI：秒伤（ENCDPS）与总伤害优先使用 ACT 的 combatant 快照
+  - 导出：
+    - `/act stats local file`：强制导出本地口径（`source=local`）
+    - `/act stats act file`：强制导出 ACT 口径（`source=act_mcp`，需快照可用）
+    - `/act stats both file`：同时导出本地+ACT 两条 JSON（同一个 `pairId` 便于脚本对比）
+    - 自动导出：始终使用本地口径（保证无 ACT 环境可用）
 
 ### 事件计入门槛（避免丢事件）
 - 不再依赖 `LocalPlayer.StatusFlags.InCombat` 作为硬门槛
-- 计入条件：**战斗已开始**（`StartTime != 0`）或 **`ConditionFlag.InCombat` 为真**，或 **来源为本地/小队成员**
-- 目的：避免死亡/脱战边界、对象表缺失等导致的伤害漏算
+- 计入条件（遭遇未开始时）：允许由**任意玩家**（`sourceId<=0x40000000`）或 **未知来源 DoT tick**（`0xE0000000`）启动；本地 `ConditionFlag.InCombat` 作为兜底
+- 目的：对齐 ACT 的 ActiveEncounter（中途加入/脱战波动/怪物先手等场景下计时更一致）
 
 ### DoT 处理（tick 采集与归因）
 - **入口**：`ACT2.ReceiveActorControlSelf` 捕获 DoT tick → `DotEventCapture` 统一排队与去重 → `ACTBattle` 写入统计
@@ -47,13 +69,18 @@
   - 命令 `/act dotdump [log|file] [all] [N]`：输出最近 DoT tick 事件（含去重/归因），用于定位错归因/重复统计
     - 默认输出到聊天栏；`log` 写入 `dalamud.log`；`file` 导出到 `pluginConfigs/DalamudACT/dot-debug.log`
   - 设置窗口 → DoT：提供按钮一键写入日志/导出文件（不占用聊天栏）
-  - 命令 `/act stats [log|file] [N]`：导出当前战斗统计快照（JSON），用于与 ACT 对照
+  - 命令 `/act stats [local|act|both] [log|file|chat] [N]`：导出当前战斗统计快照（JSON），用于与 ACT 对照
     - `file`：写入 `pluginConfigs/DalamudACT/battle-stats.jsonl`（推荐，便于 MCP/脚本读取）
     - `log`：写入 `dalamud.log`（单行 JSON）
+    - `both`：当 ACT 快照不可用时，`file` 模式会写入一条 `source=act_mcp` 的错误 JSON（`error=no_fresh_encounter_snapshot`），保证 JSONL 可持续解析
+  - 配置 `AutoExportBattleStatsOnEnd`：战斗结束自动导出 `battle-stats.jsonl`（降低对齐调试成本）
 
 ### 备选模式：ACTLike 归因（DoT/召唤物）
 - **开关**：配置 `EnableActLikeAttribution`（设置窗口 → DoT）
-- **召唤物合并**：周期性预热 `OwnerCache`，当 `ResolveOwner` 失败时触发预热并重试，减少“召唤物伤害被丢弃”导致的漏算
+- **召唤物合并**：
+  - `OwnerCache` 仅缓存 `BattleNpcSubKind.Pet`，避免把友方 NPC / 环境物件误合并到玩家名下
+  - 缓存带 TTL（默认 2.5s），降低 entityId 复用导致的错归因
+  - `ResolveOwner` 优先对象表实时 owner，缺失时回退“短期缓存”；当解析失败会预热重试，减少漏算与错归因
 - **DoT 来源推断**：当 tick 缺失 `sourceId` 且 `buffId!=0` 时，优先用目标 `StatusList` 唯一匹配来源；若同 `statusId` 多来源并存，则使用 tick 实际伤害 + 各来源 DPP + DoT 威力表做保守匹配，仅在误差与分离度满足阈值时才归因
 - **兜底**：仍无法唯一归因时回退到“未知来源 DoT”口径（计入 `TotalDotDamage` 并按目标状态模拟分配），避免误归因扩大
 - **建议**：复杂场景下开启 `EnableDotDiagnostics` 对比 ACT 做 A/B 验证，优先以“误归因减少/漏算减少”为判断标准
@@ -75,3 +102,5 @@
 - [202601121134_damage_parser_ref_deathbufftracker](../../history/2026-01/202601121134_damage_parser_ref_deathbufftracker/) - 参考 DeathBuffTracker：ActionEffectHandler 解析与签名
 - [202601140004_dot_capture_disambiguate](../../history/2026-01/202601140004_dot_capture_disambiguate/) - DoT tick 按伤害匹配归因补强
 - [202601141010_dot_sync_ff14mcp](../../history/2026-01/202601141010_dot_sync_ff14mcp/) - DotPot 改为支持从 ff14mcp 同步（补齐缺失 DoT 状态与威力）
+- [202601220445_act_encounter_sync](../../history/2026-01/202601220445_act_encounter_sync/) - 对齐 ACT ActiveEncounter：遭遇计时与生命周期
+- [202601221613_act_encounter_activity_snapshot](../../history/2026-01/202601221613_act_encounter_activity_snapshot/) - 对齐 ACT：遭遇计时推进 + BattleStats 快照稳定化

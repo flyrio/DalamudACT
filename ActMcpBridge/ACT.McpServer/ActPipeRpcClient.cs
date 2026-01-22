@@ -170,6 +170,7 @@ internal sealed class ActPipeRpcClient : IDisposable
             if (respLine == null)
                 throw new IOException("Pipe closed.");
 
+            respLine = SanitizeNamedFloatingPointLiterals(respLine);
             var node = JsonNode.Parse(respLine) as JsonObject;
             if (node == null)
                 throw new IOException("Invalid response JSON.");
@@ -194,6 +195,82 @@ internal sealed class ActPipeRpcClient : IDisposable
             }
             throw;
         }
+    }
+
+    private static string SanitizeNamedFloatingPointLiterals(string json)
+    {
+        if (string.IsNullOrEmpty(json)) return json;
+
+        // System.Text.Json 的 JsonNode/JsonDocument 不支持 NaN/Infinity（非标准 JSON 数字）。
+        // ACT 插件侧序列化在极端情况下可能输出这些 token；这里做“仅在非字符串区域”的安全替换。
+        if (json.IndexOf("NaN", StringComparison.Ordinal) < 0 &&
+            json.IndexOf("Infinity", StringComparison.Ordinal) < 0)
+            return json;
+
+        var sb = new StringBuilder(json.Length);
+        var inString = false;
+        var escaped = false;
+
+        for (var i = 0; i < json.Length; i++)
+        {
+            var c = json[i];
+
+            if (inString)
+            {
+                sb.Append(c);
+                if (escaped)
+                {
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                    inString = false;
+
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = true;
+                sb.Append(c);
+                continue;
+            }
+
+            var span = json.AsSpan(i);
+
+            if (span.StartsWith("NaN", StringComparison.Ordinal))
+            {
+                sb.Append('0');
+                i += 2;
+                continue;
+            }
+
+            if (span.StartsWith("Infinity", StringComparison.Ordinal))
+            {
+                sb.Append('0');
+                i += 7;
+                continue;
+            }
+
+            if (span.StartsWith("-Infinity", StringComparison.Ordinal) ||
+                span.StartsWith("+Infinity", StringComparison.Ordinal))
+            {
+                sb.Append('0');
+                i += 8;
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        return sb.ToString();
     }
 
     private void DisposeConnection_NoLock()
@@ -230,4 +307,3 @@ internal sealed class ActPipeRpcClient : IDisposable
         }
     }
 }
-

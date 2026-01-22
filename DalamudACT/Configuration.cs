@@ -8,7 +8,7 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 15;
+        private const int CurrentVersion = 17;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
@@ -57,6 +57,14 @@ namespace DalamudACT
         // 备选：ACTLike 归因（DoT/召唤物）
         public bool EnableActLikeAttribution = false;
 
+        // 对齐/调试：战斗结束自动导出 battle-stats.jsonl（用于与 ACT 对齐）
+        public bool AutoExportBattleStatsOnEnd = true;
+
+        // 对齐：从 ACT MCP Pipe 拉取遭遇快照（用于对齐总伤害/ENCDPS）
+        public bool EnableActMcpSync = false;
+        public bool PreferActMcpTotals = true;
+        public string ActMcpPipeName = "act-diemoe-mcp";
+
         // the below exist just to make saving less cumbersome
 
         [NonSerialized] private IDalamudPluginInterface? pluginInterface;
@@ -104,6 +112,7 @@ namespace DalamudACT
             SummaryBackgroundAlpha = Math.Clamp(SummaryBackgroundAlpha, 0f, 1f);
             LauncherButtonSize = Math.Clamp(LauncherButtonSize, 16f, 200f);
             LauncherButtonImagePath ??= string.Empty;
+            ActMcpPipeName ??= "act-diemoe-mcp";
             SummaryScale = Math.Clamp(SummaryScale, 0.5f, 2.0f);
             SummaryBackgroundColor = new Vector4(
                 Math.Clamp(SummaryBackgroundColor.X, 0f, 1f),
@@ -156,6 +165,18 @@ namespace DalamudACT
                 {
                     EnableEnhancedDotCapture = false;
                     EnableDotDiagnostics = false;
+                }
+
+                if (Version < 16)
+                {
+                    AutoExportBattleStatsOnEnd = true;
+                }
+
+                if (Version < 17)
+                {
+                    EnableActMcpSync = false;
+                    PreferActMcpTotals = true;
+                    ActMcpPipeName = "act-diemoe-mcp";
                 }
 
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列

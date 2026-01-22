@@ -11,7 +11,7 @@ namespace ActMcpBridge;
 public sealed class McpBridgePlugin : IActPluginV1
 {
     private const string DefaultPipeName = "act-diemoe-mcp";
-    private const int DefaultStatusTopCombatants = 20;
+    private const int DefaultStatusTopCombatants = 200;
 
     private Label? pluginStatusText;
     private SynchronizationContext? uiContext;
@@ -409,15 +409,15 @@ public sealed class McpBridgePlugin : IActPluginV1
         try
         {
             var damage = GetLongMember(combatant, "Damage") ?? GetCombatantItemAsLong(combatant, "damage");
-            var encdps = GetDoubleMember(combatant, "EncDPS") ?? GetCombatantItemAsDouble(combatant, "encdps");
-            var dps = GetDoubleMember(combatant, "DPS") ?? GetCombatantItemAsDouble(combatant, "dps");
+            var encdps = SanitizeDouble(GetDoubleMember(combatant, "EncDPS") ?? GetCombatantItemAsDouble(combatant, "encdps") ?? 0d);
+            var dps = SanitizeDouble(GetDoubleMember(combatant, "DPS") ?? GetCombatantItemAsDouble(combatant, "dps") ?? 0d);
 
             return new Dictionary<string, object?>
             {
                 ["name"] = combatant.Name ?? string.Empty,
                 ["damage"] = damage ?? 0L,
-                ["encdps"] = encdps ?? 0d,
-                ["dps"] = dps ?? 0d,
+                ["encdps"] = encdps,
+                ["dps"] = dps,
             };
         }
         catch
@@ -425,6 +425,9 @@ public sealed class McpBridgePlugin : IActPluginV1
             return null;
         }
     }
+
+    private static double SanitizeDouble(double value)
+        => double.IsNaN(value) || double.IsInfinity(value) ? 0d : value;
 
     private static long? GetLongMember(object instance, string name)
     {

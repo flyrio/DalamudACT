@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using DalamudACT;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
@@ -19,15 +20,19 @@ public class ACTBattle
     public static ExcelSheet<Action>? ActionSheet;
     public static ExcelSheet<Status>? StatusSheet;
     private static readonly Dictionary<uint, uint> OwnerCache = new();
+    private static readonly Dictionary<uint, long> OwnerCacheUpdatedAtMs = new();
     private static readonly object OwnerCacheLock = new();
     private static long ownerCacheWarmupLastMs;
     private const int OwnerCacheWarmupIntervalMs = 500;
+    private const int OwnerCacheTtlMs = 2500;
     //public static readonly Dictionary<uint, uint> Pet = new();
     public readonly Dictionary<uint, long> LimitBreak = new();
 
     public long StartTime;
     public long EndTime;
     public long LastEventTime;
+
+    internal ActMcpEncounterSnapshot? ActEncounter;
     public string? Zone;
     public int? Level;
     public readonly Dictionary<uint, string> Name = new();
@@ -50,6 +55,9 @@ public class ACTBattle
         EndTime = time2;
         Level = DalamudApi.PlayerState.EffectiveLevel;
     }
+
+    internal void SetActEncounter(ActMcpEncounterSnapshot? encounter)
+        => ActEncounter = encounter;
 
     public class Dot
     {
@@ -134,7 +142,19 @@ public class ACTBattle
         return index >= 0 && index < Potency.BaseSkill.Length ? Potency.BaseSkill[index] : 0u;
     }
 
-    public float Duration() => DurationSeconds(StartTime, EndTime);
+    /// <summary>
+    /// 对齐 ACT：进行中遭遇会把 Start/End 同时平移一个“结束延迟”窗口，使得
+    /// Duration 始终代表“真实事件跨度”(LastEvent-FirstEvent)，而不是包含延迟窗口。
+    /// </summary>
+    public long EffectiveStartTime()
+    {
+        if (StartTime <= 0) return 0;
+        if (LastEventTime <= 0) return StartTime;
+        if (EndTime <= LastEventTime) return StartTime;
+        return StartTime + (EndTime - LastEventTime);
+    }
+
+    public float Duration() => DurationSeconds(EffectiveStartTime(), EndTime);
 
     public float ActorDuration(uint actor)
         => DataDic.TryGetValue(actor, out var data)
@@ -148,6 +168,14 @@ public class ACTBattle
         if (LastEventTime < timeMs) LastEventTime = timeMs;
         if (EndTime < timeMs) EndTime = timeMs;
     }
+
+    /// <summary>
+    /// 用于“仅同步遭遇计时/生命周期”的战斗事件标记：
+    /// - 更新 StartTime/EndTime/LastEventTime
+    /// - 不产生/不修改任何玩家伤害数据
+    /// </summary>
+    public void MarkEncounterActivityOnly(long timeMs)
+        => MarkEncounterActivity(timeMs);
 
     private void MarkActorActivity(uint actor, long timeMs)
     {
@@ -175,8 +203,14 @@ public class ACTBattle
     private bool ShouldTrackEvent(uint sourceId)
     {
         if (StartTime != 0) return true;
-        if (DalamudApi.Conditions.Any(ConditionFlag.InCombat)) return true;
-        return sourceId != 0xE0000000 && IsLocalOrPartyMember(sourceId);
+
+        // 对齐 ACT：遭遇未开始时也允许由“任意玩家的战斗事件”启动（不再仅限本地/队伍）。
+        // 这样可避免在本地尚未进入 InCombat 或中途加入战斗时，计时/统计与 ACT ActiveEncounter 不一致。
+        if (sourceId == 0xE0000000) return true; // 未知来源 DoT tick（用于计时/总量归集）
+        if (sourceId is > 0 and <= 0x40000000) return true; // 任意玩家
+
+        // 兜底：本地已进入战斗时，允许后续事件进入（避免某些时序导致的“首事件丢失”）。
+        return DalamudApi.Conditions.Any(ConditionFlag.InCombat);
     }
 
     private void EnsurePlayer(uint objectId)
@@ -287,7 +321,9 @@ public class ACTBattle
         //死亡
         if (eventKind == EventKind.Death)
         {
+            MarkEncounterActivity(eventTimeMs);
             if (!DataDic.TryGetValue(from, out var data)) return;
+            MarkActorActivity(from, eventTimeMs);
             data.Death++;
             return;
         }
@@ -548,7 +584,21 @@ public class ACTBattle
     //    }
     //}
 
-    public static uint GetOwner(uint id) => DalamudApi.ObjectTable.SearchByEntityId(id)?.OwnerId ?? 0xE000_0000;
+    private static bool IsOwnerAttributable(IGameObject obj)
+    {
+        // 对齐 ACT：仅将“真正的宠物/召唤物”合并到玩家名下；避免把友方 NPC / 环境物件误当作玩家输出来源。
+        if (obj.ObjectKind != ObjectKind.BattleNpc) return false;
+        if (obj is not IBattleNpc npc) return false;
+        return npc.BattleNpcKind == BattleNpcSubKind.Pet;
+    }
+
+    public static uint GetOwner(uint id)
+    {
+        var obj = DalamudApi.ObjectTable.SearchByEntityId(id);
+        if (obj == null) return 0xE000_0000;
+        if (!IsOwnerAttributable(obj)) return 0xE000_0000;
+        return obj.OwnerId;
+    }
 
     public static void WarmOwnerCacheFromObjectTable(long nowMs = 0)
     {
@@ -571,6 +621,8 @@ public class ACTBattle
             var ownerId = obj.OwnerId;
             if (ownerId is 0 or > 0x4000_0000) continue;
 
+            if (!IsOwnerAttributable(obj)) continue;
+
             entries.Add((entityId, ownerId));
         }
 
@@ -580,6 +632,7 @@ public class ACTBattle
             foreach (var (entityId, ownerId) in entries)
             {
                 OwnerCache[entityId] = ownerId;
+                OwnerCacheUpdatedAtMs[entityId] = nowMs;
             }
         }
     }
@@ -589,6 +642,7 @@ public class ACTBattle
         lock (OwnerCacheLock)
         {
             OwnerCache.Clear();
+            OwnerCacheUpdatedAtMs.Clear();
         }
     }
 
@@ -596,19 +650,33 @@ public class ACTBattle
     {
         if (id == 0 || id == 0xE0000000) return id;
         if (id <= 0x40000000) return id;
-        lock (OwnerCacheLock)
-        {
-            if (OwnerCache.TryGetValue(id, out var cached) && cached is > 0 and <= 0x40000000) return cached;
-        }
 
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // 优先读对象表的实时 owner，避免 entityId 复用或缓存未及时刷新导致错归因。
         var owner = GetOwner(id);
         if (owner is > 0 and <= 0x40000000)
         {
             lock (OwnerCacheLock)
             {
                 OwnerCache[id] = owner;
+                OwnerCacheUpdatedAtMs[id] = nowMs;
+            }
+            return owner;
+        }
+
+        // 对象表缺失时回退缓存（用于处理对象表时序竞争/短暂缺失）。
+        lock (OwnerCacheLock)
+        {
+            if (OwnerCache.TryGetValue(id, out var cached) &&
+                cached is > 0 and <= 0x40000000 &&
+                OwnerCacheUpdatedAtMs.TryGetValue(id, out var updatedAt) &&
+                nowMs - updatedAt <= OwnerCacheTtlMs)
+            {
+                return cached;
             }
         }
+
         return owner;
     }
 

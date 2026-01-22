@@ -197,6 +197,15 @@ internal class PluginUI : IDisposable
                 limitDamage = selectedBattle.LimitBreak.Count > 0 ? selectedBattle.LimitBreak.Values.Sum() : 0L;
                 nameByActor = new Dictionary<uint, string>(selectedBattle.Name);
 
+                var actEncounter = config.PreferActMcpTotals ? selectedBattle.ActEncounter : null;
+                if (actEncounter != null)
+                {
+                    zone = string.IsNullOrWhiteSpace(actEncounter.Zone) ? zone : actEncounter.Zone;
+                    seconds = actEncounter.DurationSeconds();
+                    canSimDots = false;
+                    totalDotDamage = 0L;
+                }
+
                 Dictionary<uint, float>? dotByActor = null;
                 if (canSimDots && selectedBattle.TotalDotDamage > 0)
                 {
@@ -214,6 +223,12 @@ internal class PluginUI : IDisposable
                     var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
                     if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
                         totalDamage += (long)dotDamage;
+
+                    if (actEncounter != null &&
+                        nameByActor.TryGetValue(actor, out var actorName) &&
+                        !string.IsNullOrWhiteSpace(actorName) &&
+                        actEncounter.TryGetCombatant(actorName, out var actCombatant))
+                        totalDamage = actCombatant.Damage;
 
                     damage.Damages.TryGetValue(0, out var baseDamage);
                     var swings = baseDamage?.swings ?? 0;
@@ -565,6 +580,32 @@ internal class PluginUI : IDisposable
                         ImGui.TextDisabled("dot-debug.log: （无法获取插件配置目录）");
                     else
                         ImGui.TextDisabled($"dot-debug.log: {debugFilePath}");
+                }
+
+                if (ImGui.CollapsingHeader("对齐/导出", ImGuiTreeNodeFlags.DefaultOpen))
+                {
+                    changed |= ImGui.Checkbox("战斗结束自动导出 BattleStats(JSONL)", ref config.AutoExportBattleStatsOnEnd);
+                    ImGui.TextDisabled("用于与 ACT 做数值对齐（写入插件配置目录的 battle-stats.jsonl）。");
+
+                    changed |= ImGui.Checkbox("启用 ACT MCP 同步（Pipe）", ref config.EnableActMcpSync);
+                    if (config.EnableActMcpSync)
+                    {
+                        ImGui.Indent();
+                        changed |= ImGui.Checkbox("优先使用 ACT 总伤害/ENCDPS", ref config.PreferActMcpTotals);
+                        ImGui.SetNextItemWidth(260f);
+                        changed |= ImGui.InputText("Pipe 名称", ref config.ActMcpPipeName, 128);
+                        ImGui.TextDisabled("默认 Pipe: act-diemoe-mcp（ACT.McpPlugin）。");
+                        ImGui.Unindent();
+                    }
+
+                    if (ImGui.SmallButton("立即导出: BattleStats(JSONL)"))
+                        _plugin.PrintBattleStats(BattleStatsOutputTarget.File, topN: 0);
+
+                    var battleStatsPath = BattleStatsOutput.GetFilePath();
+                    if (string.IsNullOrWhiteSpace(battleStatsPath))
+                        ImGui.TextDisabled("battle-stats.jsonl: （无法获取插件配置目录）");
+                    else
+                        ImGui.TextDisabled($"battle-stats.jsonl: {battleStatsPath}");
                 }
 
                 if (changed) config.Save();
