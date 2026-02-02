@@ -22,6 +22,11 @@ public class ACTBattle
     private static readonly Dictionary<uint, uint> OwnerCache = new();
     private static readonly Dictionary<uint, long> OwnerCacheUpdatedAtMs = new();
     private static readonly object OwnerCacheLock = new();
+
+    /// <summary>
+    /// 对齐 ACT：当启用时，将更多“带 OwnerId 的实体”（含部分地面/召唤类对象）归并到玩家名下，减少漏算。
+    /// </summary>
+    public static bool ActLikeOwnerAttribution { get; set; }
     private static long ownerCacheWarmupLastMs;
     private const int OwnerCacheWarmupIntervalMs = 500;
     private const int OwnerCacheTtlMs = 2500;
@@ -40,12 +45,18 @@ public class ACTBattle
     public readonly Dictionary<long, long> PlayerDotPotency = new();
     public readonly Dictionary<uint, long> DotDamageByActor = new();
     public readonly Dictionary<uint, int> DotTickCountByActor = new();
+    public readonly Dictionary<uint, long> DotTotalOnlyDamageByActor = new();
+    public readonly Dictionary<uint, int> DotTotalOnlyTickCountByActor = new();
     public readonly Dictionary<ulong, uint> DotSourceCache = new();
     public readonly Dictionary<ulong, uint> DotBuffCache = new();
 
     public readonly List<Dot> ActiveDots = new();
     public long TotalDotDamage;
+    public long UndistributableDotDamage;
     public float TotalDotSim;
+    public long TotalDotPotencyAll;
+    public long TotalDotPotencyKnown;
+    public long UnassignedDotDamage;
     public Dictionary<long, float> DotDmgList = new();
 
 
@@ -58,6 +69,22 @@ public class ACTBattle
 
     internal void SetActEncounter(ActMcpEncounterSnapshot? encounter)
         => ActEncounter = encounter;
+
+    internal void SyncEncounterTimingFromAct(ActMcpEncounterSnapshot encounter, int timeoutMs)
+    {
+        if (encounter.StartTimeMs > 0 && (StartTime == 0 || encounter.StartTimeMs < StartTime))
+            StartTime = encounter.StartTimeMs;
+
+        if (encounter.EndTimeMs > 0 && encounter.EndTimeMs > EndTime)
+            EndTime = encounter.EndTimeMs;
+
+        if (encounter.EndTimeMs > 0)
+        {
+            var actLastEvent = encounter.EndTimeMs - Math.Max(timeoutMs, 0);
+            if (actLastEvent > LastEventTime)
+                LastEventTime = actLastEvent;
+        }
+    }
 
     public class Dot
     {
@@ -78,6 +105,23 @@ public class ACTBattle
 
         public long FirstDamageTime;
         public long LastDamageTime;
+    }
+
+    public bool HasMeaningfulData()
+    {
+        if (ActEncounter != null && ActEncounter.CombatantsByName.Count > 0) return true;
+        if (LimitBreak.Count != 0) return true;
+
+        foreach (var kv in DataDic)
+        {
+            if (kv.Value?.Damages != null &&
+                kv.Value.Damages.TryGetValue(Total, out var total) &&
+                total != null &&
+                total.Damage != 0)
+                return true;
+        }
+
+        return false;
     }
 
     public class SkillDamage
@@ -183,21 +227,6 @@ public class ACTBattle
         if (!DataDic.TryGetValue(actor, out var data)) return;
         if (data.FirstDamageTime == 0) data.FirstDamageTime = timeMs;
         if (data.LastDamageTime < timeMs) data.LastDamageTime = timeMs;
-    }
-
-    private static bool IsLocalOrPartyMember(uint actorId)
-    {
-        if (actorId == 0 || actorId > 0x40000000) return false;
-
-        var localPlayer = DalamudApi.ObjectTable.LocalPlayer;
-        if (localPlayer != null && localPlayer.EntityId == actorId) return true;
-
-        foreach (var member in DalamudApi.PartyList)
-        {
-            if (member.EntityId == actorId) return true;
-        }
-
-        return false;
     }
 
     private bool ShouldTrackEvent(uint sourceId)
@@ -335,26 +364,41 @@ public class ACTBattle
             TotalDotDamage += damage;
             if (!CheckTargetDot(target))
             {
+                UndistributableDotDamage += damage;
                 CalcDot();
                 return;
             }
 
-            if (id != 0 && DotPot().ContainsKey(id))
+            if (ActiveDots.Count == 0)
+            {
+                UndistributableDotDamage += damage;
+                CalcDot();
+                return;
+            }
+
+            var dotPot = DotPot();
+            if (id != 0 && dotPot.ContainsKey(id))
                 ActiveDots.RemoveAll(dot => dot.BuffId != id);
 
             foreach (var dot in ActiveDots)
             {
-                if (dot.Source > 0x40000000) dot.Source = ResolveOwner(dot.Source);
-                if (dot.Source > 0x40000000) continue;
-                EnsurePlayer(dot.Source);
-                if (!DataDic.ContainsKey(dot.Source)) continue;
-                MarkActorActivity(dot.Source, eventTimeMs);
+                if (!dotPot.TryGetValue(dot.BuffId, out var pot)) continue;
+                TotalDotPotencyAll += pot;
+
+                var resolvedSource = dot.Source;
+                if (resolvedSource > 0x40000000) resolvedSource = ResolveOwner(resolvedSource);
+                if (resolvedSource is 0 or > 0x4000_0000) continue;
+
+                EnsurePlayer(resolvedSource);
+                MarkActorActivity(resolvedSource, eventTimeMs);
                 
-                var active = DotToActive(dot);
+                var active = ((long)dot.BuffId << 32) + resolvedSource;
                 if (PlayerDotPotency.ContainsKey(active))
-                    PlayerDotPotency[active] += DotPot()[dot.BuffId];
+                    PlayerDotPotency[active] += pot;
                 else
-                    PlayerDotPotency.Add(active,DotPot()[dot.BuffId]);
+                    PlayerDotPotency.Add(active, pot);
+
+                TotalDotPotencyKnown += pot;
             }
 
             CalcDot();
@@ -441,8 +485,23 @@ public class ACTBattle
             DotTickCountByActor.Add(from, 1);
     }
 
+    public void AddDotTotalOnlyTick(uint from, long damage)
+    {
+        if (from > 0x40000000 || from == 0x0) return;
+        if (DotTotalOnlyDamageByActor.ContainsKey(from))
+            DotTotalOnlyDamageByActor[from] += damage;
+        else
+            DotTotalOnlyDamageByActor.Add(from, damage);
+
+        if (DotTotalOnlyTickCountByActor.ContainsKey(from))
+            DotTotalOnlyTickCountByActor[from]++;
+        else
+            DotTotalOnlyTickCountByActor.Add(from, 1);
+    }
+
     private void CalcDot()
     {
+        UnassignedDotDamage = TotalDotDamage;
         TotalDotSim = 0;
 
         // ?? DPP ?????????:?? DoT ???????
@@ -478,9 +537,24 @@ public class ACTBattle
             return;
         }
 
+        var distributableDotDamage = TotalDotDamage - UndistributableDotDamage;
+        if (distributableDotDamage < 0) distributableDotDamage = 0;
+        if (TotalDotPotencyAll > 0 && TotalDotPotencyKnown >= 0 && TotalDotPotencyKnown < TotalDotPotencyAll)
+        {
+            var coverage = (double)TotalDotPotencyKnown / TotalDotPotencyAll;
+            if (coverage < 0) coverage = 0;
+            if (coverage > 1) coverage = 1;
+            distributableDotDamage = (long)Math.Round(distributableDotDamage * coverage);
+            if (distributableDotDamage < 0) distributableDotDamage = 0;
+            if (distributableDotDamage > TotalDotDamage) distributableDotDamage = TotalDotDamage;
+        }
+
+        UnassignedDotDamage = TotalDotDamage - distributableDotDamage;
+        if (UnassignedDotDamage < 0) UnassignedDotDamage = 0;
+
         foreach (var (active, damage) in DotDmgList)
         {
-            DotDmgList[active] = damage / TotalDotSim * TotalDotDamage;
+            DotDmgList[active] = damage / TotalDotSim * distributableDotDamage;
         }
 
         var dic = from entry in DotDmgList orderby entry.Value descending select entry;
@@ -586,10 +660,16 @@ public class ACTBattle
 
     private static bool IsOwnerAttributable(IGameObject obj)
     {
-        // 对齐 ACT：仅将“真正的宠物/召唤物”合并到玩家名下；避免把友方 NPC / 环境物件误当作玩家输出来源。
         if (obj.ObjectKind != ObjectKind.BattleNpc) return false;
         if (obj is not IBattleNpc npc) return false;
-        return npc.BattleNpcKind == BattleNpcSubKind.Pet;
+
+        // 默认：仅将“真正的宠物/召唤物”合并到玩家名下；避免把友方 NPC / 环境物件误当作玩家输出来源。
+        if (!ActLikeOwnerAttribution)
+            return npc.BattleNpcKind == BattleNpcSubKind.Pet;
+
+        // ACTLike：只要 OwnerId 是有效玩家，就归并到玩家名下（用于减少地面 DoT / 机制物件导致的漏算）。
+        var ownerId = obj.OwnerId;
+        return ownerId is > 0 and <= 0x4000_0000;
     }
 
     public static uint GetOwner(uint id)
@@ -740,7 +820,7 @@ public class ACTBattle
         {
             if (!dotPot.ContainsKey(status.StatusId)) continue;
             var resolved = ResolveOwner(status.SourceId);
-            if (!IsLocalOrPartyMember(resolved)) continue;
+            if (resolved is 0 or > 0x40000000) continue;
             if (matchedBuff != 0 && matchedBuff != status.StatusId) return false;
             matchedBuff = status.StatusId;
         }
@@ -765,7 +845,7 @@ public class ACTBattle
         {
             if (!dotPot.ContainsKey(status.StatusId)) continue;
             var resolved = ResolveOwner(status.SourceId);
-            if (!IsLocalOrPartyMember(resolved)) continue;
+            if (resolved is 0 or > 0x40000000) continue;
 
             var key = ((ulong)resolved << 32) | status.StatusId;
             if (!pairs.Add(key)) continue;
@@ -892,6 +972,25 @@ public class ACTBattle
         return true;
     }
 
+    public bool HasAnyDotFromSource(uint targetId, uint sourceId)
+    {
+        if (sourceId == 0 || sourceId > 0x40000000) return false;
+
+        var target = DalamudApi.ObjectTable.SearchByEntityId(targetId);
+        if (target == null || target.ObjectKind != ObjectKind.BattleNpc) return false;
+
+        var dotPot = DotPot();
+        foreach (var status in ((IBattleNpc)target).StatusList)
+        {
+            var statusId = status.StatusId;
+            if (!dotPot.ContainsKey(statusId) && !Potency.BuffToAction.ContainsKey(statusId)) continue;
+            var resolved = ResolveOwner(status.SourceId);
+            if (resolved == sourceId) return true;
+        }
+
+        return false;
+    }
+
     public bool TryResolveDotSourceByDamage(uint targetId, uint buffId, long damage, out uint sourceId)
     {
         sourceId = 0;
@@ -977,7 +1076,7 @@ public class ACTBattle
         {
             if (!dotPot.ContainsKey(status.StatusId)) continue;
             var resolved = ResolveOwner(status.SourceId);
-            if (!IsLocalOrPartyMember(resolved)) continue;
+            if (resolved is 0 or > 0x40000000) continue;
 
             var key = ((ulong)resolved << 32) | status.StatusId;
             if (!pairs.Add(key)) continue;

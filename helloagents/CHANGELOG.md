@@ -18,7 +18,7 @@
 - 新增：PotencyUpdater 支持从 ff14mcp 同步 DotPot（`--ff14mcp-dots`）
 - 更新：7.4 DoT 数据集（ff14-mcp）并同步 DotPot
 - 优化：DoT tick `buffId=0` 且同源多 DoT 时按伤害匹配推断（`TryResolveDotBuffByDamage`）
-- 修复：DoT tick 同时缺失 `sourceId`/`buffId` 时不再按伤害推断来源（移除 `TryResolveDotPairByDamage` 调用），改为先推断 `buffId`，再仅在状态表唯一时补齐来源
+- 调整：DoT tick 同时缺失 `sourceId`/`buffId` 时，启用增强归因后可用“目标状态候选 + tick 伤害”进行 `(sourceId,buffId)` 配对消歧；失败则回退为推断 `buffId`/模拟分配兜底，避免误归因扩大
 - 优化：`CalcDot` 在 DPP 不就绪时使用 fallback，避免 DoT 分配长时间不变动
 - 修复：统计丢事件导致总伤害偏低（计入门槛放宽、PartyList 兜底建档、未知来源 DoT 无法扫描仍计入）
 - 修复：参考 DeathBuffTracker，ActionEffect 改用 `ActionEffectHandler.Receive` 的签名与结构体解析，减少漏算与版本漂移
@@ -31,18 +31,62 @@
 - 新增：`/act dotdump [log|file] [all] [N]` 输出最近 DoT tick 事件（含去重/归因），可写入 `dalamud.log`/导出 `dot-debug.log`
 - 新增：设置窗口 → DoT：一键写入日志/导出文件（不占用聊天栏）
 - 优化：未知来源 DoT 仅推断 `buffId` 用于模拟分配，不再强行推断来源
-- 优化：未开启“ACTLike 归因”时，DoT tick 来源推断默认优先扫描目标 `StatusList`，失败再回退缓存，减少缓存过期导致的错归因
+- 修复：未开启“ACTLike 归因”时，DoT tick 来源推断默认优先扫描目标 `StatusList` + 按伤害匹配；推断失败不再回退来源缓存，改为未知来源（减少多来源同 statusId 错归因）
 - 新增：ACT.DieMoe MCP 通讯桥（ACT 插件 + MCP stdio server + Named Pipe IPC）
 - 新增：ACT MCP `act_status` 附带当前遭遇快照（Top combatants：damage/encdps/dps），便于与 Dalamud 侧对齐
 - 新增：ACT MCP `act_notify` 支持 `mcp:stats [top=N]` 触发一次性遭遇统计输出（配合 `act_log_tail` 拉取）
+- 增强：ACT MCP `dotDamage` 优先通过 `ColCollection` + `GetColumnByName` 自动定位 DoT 伤害列，回退 Tags/AllOut 聚合与扫描兜底，并在 `mcp:stats` 日志输出 `dot=` 便于核对
+- 增强：ACT MCP `dotDamage` 解析容错（支持 `xxx (yy%)`/`k/m` 等格式化字段；关键词匹配支持中文），并保留 `mcp:items` 用于输出 CombatantData.Items 键值以定位列名
+- 增强：ACT MCP `dotDamage` 增加调试元信息 `dotDamageMethod`/`dotDamageKey`，用于快速定位当前 ACT 环境下实际命中的 DoT 统计口径/列名
+- 增强：ACT MCP `dotDamage` 识别范围扩展：支持仅包含 `DoT/Tick/持续/周期/跳` 等关键词的数值列（不强制要求列名包含 “Damage/伤害”）
+- 新增：实验/高风险：Dalamud 侧 `EnableActDllBridgeExperimental` + `ActDieMoeRoot` + `/act actdll`，用于在游戏进程内探测加载 ACT/`FFXIV_ACT_Plugin` DLL（仅用于验证可行性/失败原因）
 - 新增：`/act stats [log|file] [N]` 导出战斗统计快照（JSON），写入 `pluginConfigs/DalamudACT/battle-stats.jsonl` 便于 MCP/脚本对照 ACT
 - 新增：`/act stats local|act|both ...` 支持强制本地/ACT/双快照导出（`both` 输出同一个 `pairId` 便于脚本对比）
-- 变更：战斗结束自动导出固定为本地口径（`source=local`），保证无 ACT 环境可用
+- 变更：战斗结束自动导出在启用 `EnableActMcpSync` 时默认输出 `both`（`local` + `act_mcp`，同一个 `pairId`），否则仍为 `local`
 - 修复/对齐：补充 Network DoT tick 入口（ActionEffect `sourceId=0xE0000000`），与 Legacy 通道去重后归入 `DotEventCapture`，减少“不可见 DoT”导致的漏算
-- 修复/对齐：遭遇开始/结束口径对齐 ACT `ActiveEncounter`（战斗事件驱动计时 + 5s 失活超时），不再依赖本地 `InCombat` 分段
+- 修复/对齐：遭遇开始/结束口径对齐 ACT `ActiveEncounter`（战斗事件驱动计时 + 可配置失活超时），不再依赖本地 `InCombat` 分段
 - 修复/对齐：`ActionEffect` 检测到 damage-like effect 时也推进遭遇计时（仅更新 Start/Last/End，不写入玩家伤害），避免只剩敌方动作时过早分段
-- 修复/对齐：`/act stats both file` 改为读取“战斗快照”避免并发不一致；当 ACT 快照不可用时 `file` 输出 JSON 诊断行，保证 `battle-stats.jsonl` 可持续解析
+- 修复/对齐：`/act stats both file` 当 on-demand 拉取失败时回退使用缓存 ACT 快照；无快照时 `file` 输出诊断行（`error=no_encounter_snapshot`），保证 `battle-stats.jsonl` 可持续解析
+- 新增：BattleStats 的 `act_mcp` 行附带 `actSnapshotOnDemand`（`true`=本次 on-demand 成功；`false`=回退缓存）
+- 修复/对齐：启用 `PreferActMcpTotals` 且有 `ActEncounter` 时同步本地遭遇计时（Start/Last/End）到 ACT 口径，减少误分段与对照偏差
+- 修复/对齐：遭遇计时推进扩展到 BattleNpc 行为/敌方施法（无伤害但仍有动作的阶段不再过早分段）
 - 修复：`ResolveOwner` 优先对象表实时 owner（缺失回退缓存），降低 entityId 复用/缓存导致的召唤物错归因
 - 新增：战斗结束自动导出 `battle-stats.jsonl`（`AutoExportBattleStatsOnEnd`）并提供设置窗口开关与“立即导出”按钮
 - 新增：可选 ACT MCP 同步（`EnableActMcpSync` + `PreferActMcpTotals` + `ActMcpPipeName`），UI/导出可直接采用 ACT combatant 口径对齐总伤害/ENCDPS
 - 修复：ACT MCP 返回中出现 `NaN/Infinity` 时的 JSON 解析失败（服务端读取侧清洗；插件侧也对 `EncDPS/DPS` 做有限值兜底）
+- 修复：ACT MCP Named Pipe 服务端支持多客户端并发连接，避免 MCP Server 长连接独占 Pipe 导致 Dalamud 侧同步失败
+- 修复/对齐：启用 `PreferActMcpTotals` 时，UI 秒伤直接使用 ACT 返回的 `ENCDPS/DPS`（与 `DpsTimeMode` 联动）
+- 修复：ACT MCP Pipe 多客户端实现中的变量捕获问题，避免客户端连接后无响应/调用超时
+- 修复：遭遇结束逻辑增加 `InCombat` keepalive，避免 boss 转阶段上天/无敌导致误分段重置本场战斗记录
+- 修复：ACT MCP 陈旧遭遇快照过滤，避免“旧遭遇残留”导致本地持续误分段并用空白战斗覆盖历史
+- 变更/对齐：遭遇结束失活超时改为可配置 `EncounterTimeoutMs`（默认 `30000ms`），减少转阶段/脱战波动导致的误分段与数据丢失
+- 修复：空白遭遇/历史筛选改用 `HasMeaningfulData`（实际总伤害>0 或 DoT/LB），避免仅建档但 0 伤害的空白战斗覆盖历史
+- 修复：`/act actdll init` 试跑改为 STA 线程 + 显式 Dispose，并在试跑模式下跳过 ALC.Unload，降低 WinForms Finalizer 导致的崩溃风险
+- 变更：配置版本升级默认启用 `EnableEnhancedDotCapture`（更贴近 ACT 的 DoT 归因与明细输出）
+- 修复：UI 历史战斗筛选排除无数据战斗（无玩家伤害/无 DoT/无 LB），避免历史翻页出现空白覆盖
+- 增强/对齐：启用 `EnableActLikeAttribution` 时，Owner 归因扩展为“任意有效玩家 OwnerId 的 BattleNpc”，覆盖部分地面 DoT/机制物件导致的漏算
+- 增强：BattleStats 导出追加 per-actor `dotTickDamage`/`dotTickCount`，并在 `act_mcp` 行输出 `actDotDamage`，便于对照 DoT 统计
+- 增强：BattleStats 的 `act_mcp` 行 `totalDotDamage` 改为对当前导出 `actors` 的 `actDotDamage` 求和（用于核对 DOT 占比）
+- 调整：BattleStats 的 `act_mcp` 行将本地 DoT 明细字段（`dotTickDamage/dotTickCount/dotSkillDamage/dotTotalOnly*`）置为 0，仅保留 `actDotDamage` 作为权威 DoT 数据源
+- 修复/对齐：BattleStats 的 `local` 行 `totalDotDamage` 改为“DoT tick 总量 + 未知来源 DoT 总量”；并在启用 DoT 模拟分配时将未分配的未知来源 DoT 计入 `totalDamageAll`，避免对齐分析时出现 0/偏低
+- 修复/对齐：DoT tick 报文 `buffId=0` 时的推断：优先补齐 `buffId`；仅当 `sourceId` 缺失时才使用配对消歧推断 `(sourceId,buffId)`，避免覆盖可信 `sourceId` 导致的 DoT 错归因
+- 修复/对齐：DoT 推断候选不再限制“仅本地/队伍”，扩展到目标状态表中的全部玩家来源，提升大规模战斗对齐 ACT 的稳定性
+- 修复/对齐：Network DoT tick 识别扩展到 `sourceId!=0xE0000000` 且 `actionId` 命中 DoT 表的场景，避免周期性伤害被当作普通技能伤害导致 DoT 统计偏低
+- 修复：DoT tick 在 `buffId=0` 且 `sourceId` 已知时，若目标身上不存在该来源的任何 DoT 状态，则回退为未知来源（计入 `RejectedSourceNotOnTarget`），避免错归因导致 DoT 异常偏高
+- 修复：DoT tick 来源推断不再回退 `(targetId,buffId)->sourceId` 缓存（同 `statusId` 多来源并存时回退未知来源），避免同职业 DoT 极端偏差
+- 修复：启用 `PreferActMcpTotals` 且 ACT 快照可用时，UI 顶部/汇总的 DOT 总伤害使用 ACT `dotDamage` 求和，避免显示为 0
+- 调整：Tooltip 的 DOT 伤害在启用 `PreferActMcpTotals` 且 ACT 快照可用时以 ACT `dotDamage` 为准（显示 DOT 占比）；否则仍以 “Tick + 模拟补正” 为准，并继续提示“未识别DOT tick（TotalOnly）”
+- 优化：ACT MCP Bridge 日志输出对非 ASCII 做转义（`\uXXXX`），并在 `act/status` 补充 `pluginLocation` 回退（CodeBase），便于排查部署与乱码问题
+- 增强：DotDump 增加 `DROP=RejectedSourceNotOnTarget` 标记，便于从日志直接定位“目标无该来源 DoT → 回退未知来源”的 tick
+- 增强：BattleStats 导出追加 per-actor `dotSkillDamage`、`dotTotalOnlyTickDamage`/`dotTotalOnlyTickCount`，便于定位“tick 捕获 vs 技能汇总”差异
+- 修复：未知来源 DoT tick 在目标无可分配状态/无法读状态时计入 `UnassignedDotDamage`，避免错分配导致 DoT 偏高
+- 优化：BattleStats 自动导出跳过“无任何玩家伤害”的空遭遇，避免 `battle-stats.jsonl` 充斥空快照
+- 增强：BattleStats 的 `act_mcp` 行追加 `actTopCombatants`（Top30 combatants 摘要），便于排查“宠物/地面 DoT 是否在 ACT 中独立计入”等对齐问题
+- 变更：配置版本 v21 起默认启用 `EnableActMcpSync=true`（存在 ACT.McpPlugin 时自动对齐；不存在则回退本地统计）
+- 修复：ACT MCP 轮询在当前战斗槽位为空时将快照写入上一场战斗，避免空白槽位被旧遭遇覆盖导致历史不断被“空白战斗”挤掉
+- 修复：历史战斗判定不再把“仅未知来源 DoT 总量”视为有效战斗，减少历史翻页空白覆盖
+- 增强：BattleStats 导出的 `act_mcp` 行使用 ACT 的 `combatants` 生成完整 `actors` 列表，保证 `totalDamageAll/totalDotDamage` 与 ACT 一致
+- 优化：非战斗状态下 ACT MCP 轮询降频（10s），减少等待怪刷新时的无效开销
+- 修复：战斗状态下不因 ACT `endTime` 长时间不更新而清空 `ActEncounter`（避免 Boss 转阶段/不可打导致 UI 回退本地口径、DOT 占比对不上）
+- 修复：战斗状态下允许接受“看似陈旧”的 ACT 遭遇快照（仅用于保持对齐与减少误分段；离开战斗后仍会按超时清理旧快照）
+- 新增：战斗结束自动导出 `DoTStats` + `DotDump(all)` 到 `dot-debug.log`（`AutoExportDotDumpOnEnd`/`AutoExportDotDumpMax`），便于离线核对 DoT 归因差异

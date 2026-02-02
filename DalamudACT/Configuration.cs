@@ -8,7 +8,7 @@ namespace DalamudACT
     [Serializable]
     public class Configuration : IPluginConfiguration
     {
-        private const int CurrentVersion = 17;
+        private const int CurrentVersion = 22;
 
         public Vector2 CardsWindowPos = Vector2.Zero;
         public bool HasCardsWindowPos = false;
@@ -50,6 +50,9 @@ namespace DalamudACT
         // 0=ENCDPS(按战斗时长) 1=DPS(按个人活跃时长)
         public int DpsTimeMode = 0;
 
+        // 对齐 ACT：遭遇结束判定超时（毫秒）。过短会在 boss 转阶段/脱战瞬间误分段。
+        public int EncounterTimeoutMs = 30000;
+
         // DoT 采集与诊断
         public bool EnableEnhancedDotCapture = false;
         public bool EnableDotDiagnostics = false;
@@ -60,10 +63,18 @@ namespace DalamudACT
         // 对齐/调试：战斗结束自动导出 battle-stats.jsonl（用于与 ACT 对齐）
         public bool AutoExportBattleStatsOnEnd = true;
 
+        // 对齐/调试：战斗结束自动导出 dot-debug.log（DoTStats + DotDump），用于离线对照 DoT 归因差异
+        public bool AutoExportDotDumpOnEnd = false;
+        public int AutoExportDotDumpMax = 200;
+
         // 对齐：从 ACT MCP Pipe 拉取遭遇快照（用于对齐总伤害/ENCDPS）
-        public bool EnableActMcpSync = false;
+        public bool EnableActMcpSync = true;
         public bool PreferActMcpTotals = true;
         public string ActMcpPipeName = "act-diemoe-mcp";
+
+        // 实验/高风险：在游戏进程内尝试加载 ACT / FFXIV_ACT_Plugin DLL（仅用于 PoC 探测）
+        public bool EnableActDllBridgeExperimental = false;
+        public string ActDieMoeRoot = @"C:\Program Files (x86)\宝宝轮椅\ACT.DieMoe";
 
         // the below exist just to make saving less cumbersome
 
@@ -113,6 +124,7 @@ namespace DalamudACT
             LauncherButtonSize = Math.Clamp(LauncherButtonSize, 16f, 200f);
             LauncherButtonImagePath ??= string.Empty;
             ActMcpPipeName ??= "act-diemoe-mcp";
+            ActDieMoeRoot ??= @"C:\Program Files (x86)\宝宝轮椅\ACT.DieMoe";
             SummaryScale = Math.Clamp(SummaryScale, 0.5f, 2.0f);
             SummaryBackgroundColor = new Vector4(
                 Math.Clamp(SummaryBackgroundColor.X, 0f, 1f),
@@ -179,6 +191,37 @@ namespace DalamudACT
                     ActMcpPipeName = "act-diemoe-mcp";
                 }
 
+                if (Version < 18)
+                {
+                    EncounterTimeoutMs = 30000;
+                }
+
+                if (Version < 19)
+                {
+                    EnableActDllBridgeExperimental = false;
+                    ActDieMoeRoot = @"C:\Program Files (x86)\宝宝轮椅\ACT.DieMoe";
+                }
+
+                if (Version < 20)
+                {
+                    // 默认启用：用于修正 DoT 归因/去重/明细，对齐 ACT 的常见口径。
+                    EnableEnhancedDotCapture = true;
+                }
+
+                if (Version < 21)
+                {
+                    // 用户目标：尽可能与 ACT 一致。默认启用 ACT MCP 同步（存在时自动对齐；不存在则自动回退本地统计）。
+                    EnableActMcpSync = true;
+                    PreferActMcpTotals = true;
+                }
+
+                if (Version < 22)
+                {
+                    // 调试/对齐：为了便于离线核对 DoT，战斗结束自动导出 DotDump/DoTStats（可在设置里关闭）。
+                    AutoExportDotDumpOnEnd = true;
+                    AutoExportDotDumpMax = 200;
+                }
+
                 // v1: DisplayLayout 0=纵向列表 1=独立名片列
                 if (Version <= 1)
                 {
@@ -197,6 +240,9 @@ namespace DalamudACT
                 DpsTimeMode = 0;
                 changed = true;
             }
+
+            EncounterTimeoutMs = Math.Clamp(EncounterTimeoutMs, 1000, 120000);
+            AutoExportDotDumpMax = Math.Clamp(AutoExportDotDumpMax, 20, 2000);
 
             if (changed) Save();
         }

@@ -41,14 +41,15 @@ internal sealed class ActMcpEncounterSnapshot
 internal readonly struct ActMcpCombatantSnapshot
 {
     public long Damage { get; }
+    public long DotDamage { get; }
     public double EncDps { get; }
     public double Dps { get; }
 
-    public ActMcpCombatantSnapshot(long damage, double encDps, double dps)
+    public ActMcpCombatantSnapshot(long damage, long dotDamage, double encDps, double dps)
     {
         Damage = damage;
+        DotDamage = dotDamage;
         EncDps = encDps;
         Dps = dps;
     }
 }
-

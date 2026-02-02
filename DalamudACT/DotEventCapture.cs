@@ -44,6 +44,7 @@ internal readonly struct DotCaptureStats
     public readonly long UnknownBuff;
     public readonly long InferredSource;
     public readonly long InferredBuff;
+    public readonly long RejectedSourceNotOnTarget;
     public readonly long AttributedToAction;
     public readonly long AttributedToStatus;
     public readonly long AttributedToTotalOnly;
@@ -59,6 +60,7 @@ internal readonly struct DotCaptureStats
         long unknownBuff,
         long inferredSource,
         long inferredBuff,
+        long rejectedSourceNotOnTarget,
         long attributedToAction,
         long attributedToStatus,
         long attributedToTotalOnly)
@@ -73,6 +75,7 @@ internal readonly struct DotCaptureStats
         UnknownBuff = unknownBuff;
         InferredSource = inferredSource;
         InferredBuff = inferredBuff;
+        RejectedSourceNotOnTarget = rejectedSourceNotOnTarget;
         AttributedToAction = attributedToAction;
         AttributedToStatus = attributedToStatus;
         AttributedToTotalOnly = attributedToTotalOnly;
@@ -117,6 +120,7 @@ internal sealed class DotEventCapture
     private long unknownBuff;
     private long inferredSource;
     private long inferredBuff;
+    private long rejectedSourceNotOnTarget;
     private long attributedToAction;
     private long attributedToStatus;
     private long attributedToTotalOnly;
@@ -153,6 +157,7 @@ internal sealed class DotEventCapture
         InvalidTarget = 1,
         SameChannelDuplicate = 2,
         CrossChannelDuplicate = 3,
+        RejectedSourceNotOnTarget = 4,
     }
 
     internal enum DotAttributionKind : byte
@@ -238,6 +243,7 @@ internal sealed class DotEventCapture
                 unknownBuff,
                 inferredSource,
                 inferredBuff,
+                rejectedSourceNotOnTarget,
                 attributedToAction,
                 attributedToStatus,
                 attributedToTotalOnly);
@@ -271,14 +277,21 @@ internal sealed class DotEventCapture
 
         if (batch.Count > 1)
         {
-            // 优先处理带 buffId 的事件，便于后续去重保留更“信息完整”的那条。
+            // 优先处理“来源明确”的事件（非 0/0xE0000000），便于后续推断/缓存填充与跨通道去重。
+            // 其次处理带 buffId 的事件，便于后续去重保留更“信息完整”的那条。
             batch.Sort((a, b) =>
             {
                 var t = a.TimeMs.CompareTo(b.TimeMs);
                 if (t != 0) return t;
-                var aScore = a.BuffId == 0 ? 1 : 0;
-                var bScore = b.BuffId == 0 ? 1 : 0;
-                t = aScore.CompareTo(bScore);
+
+                var aSourceScore = a.SourceId is 0 or 0xE000_0000 ? 1 : 0;
+                var bSourceScore = b.SourceId is 0 or 0xE000_0000 ? 1 : 0;
+                t = aSourceScore.CompareTo(bSourceScore);
+                if (t != 0) return t;
+
+                var aBuffScore = a.BuffId == 0 ? 1 : 0;
+                var bBuffScore = b.BuffId == 0 ? 1 : 0;
+                t = aBuffScore.CompareTo(bBuffScore);
                 if (t != 0) return t;
                 return ((int)a.Channel).CompareTo((int)b.Channel);
             });
@@ -318,6 +331,7 @@ internal sealed class DotEventCapture
 
         // 字段修复：owner 解析、source/buff 推断。
         var sourceId = evt.SourceId;
+        var rejectedNotOnTarget = false;
         if (sourceId > 0x4000_0000 && sourceId != 0xE000_0000)
         {
             var resolvedOwner = ACTBattle.ResolveOwner(sourceId);
@@ -338,6 +352,24 @@ internal sealed class DotEventCapture
         var buffId = evt.BuffId;
         var damage = (long)evt.Damage;
 
+        // 当原始报文缺失 buffId 时，buffId 往往不可靠；但 sourceId 在部分通道/环境下仍可能是正确的。
+        // 为避免“同职业多目标/多玩家同 DoT”场景下误覆盖导致 DoT 错归因：仅在 sourceId 缺失时才使用 (目标状态候选 + tick 实际伤害) 进行 (source,buff) 配对推断。
+        if (config.EnableEnhancedDotCapture && originalBuffId == 0 && damage > 0 && (sourceId == 0 || sourceId > 0x4000_0000))
+        {
+            if (battle.TryResolveDotPairByDamage(targetId, damage, out var pairSource, out var pairBuff) &&
+                pairSource is > 0 and <= 0x4000_0000 &&
+                pairBuff != 0)
+            {
+                sourceId = pairSource;
+                buffId = pairBuff;
+                lock (gate)
+                {
+                    inferredSource++;
+                    inferredBuff++;
+                }
+            }
+        }
+
         if ((sourceId == 0 || sourceId > 0x4000_0000) && buffId != 0)
         {
             var resolved = false;
@@ -353,9 +385,6 @@ internal sealed class DotEventCapture
                 // 默认优先尝试“目标状态表”解析（更接近 ACT），失败再回退缓存，避免缓存过期导致错归因。
                 resolved = battle.TryResolveDotSource(targetId, buffId, out resolvedSource) ||
                            battle.TryResolveDotSourceByDamage(targetId, buffId, damage, out resolvedSource);
-
-                if (!resolved && battle.TryGetCachedDotSource(targetId, buffId, out var cachedSource))
-                    sourceId = cachedSource;
             }
 
             if (resolved && resolvedSource != 0)
@@ -390,11 +419,31 @@ internal sealed class DotEventCapture
             }
         }
 
+        // 组合推断：当 source/buff 同时缺失时，直接用 (目标状态表 + 伤害) 做一次“配对消歧”，尽量减少未知 DoT 的总量分摊误差。
+        if (config.EnableEnhancedDotCapture && damage > 0 && (sourceId == 0 || sourceId > 0x4000_0000) && buffId == 0)
+        {
+            if (battle.TryResolveDotPairByDamage(targetId, damage, out var pairSource, out var pairBuff) &&
+                pairSource is > 0 and <= 0x4000_0000 &&
+                pairBuff != 0)
+            {
+                sourceId = pairSource;
+                buffId = pairBuff;
+                lock (gate)
+                {
+                    inferredSource++;
+                    inferredBuff++;
+                }
+            }
+        }
+
         // 二次来源推断：当报文缺失 buffId 但后续推断补齐后，若 sourceId 仍未知，则再尝试解析来源。
-        // 该分支不按伤害“强行推断来源”，仅在目标状态表能唯一确定来源时才补齐（避免错归因扩大）。
         if (originalBuffId == 0 && (sourceId == 0 || sourceId > 0x4000_0000) && buffId != 0)
         {
-            if (battle.TryResolveDotSource(targetId, buffId, out var resolvedSource) && resolvedSource != 0)
+            var resolved = battle.TryResolveDotSource(targetId, buffId, out var resolvedSource);
+            if (!resolved && damage > 0)
+                resolved = battle.TryResolveDotSourceByDamage(targetId, buffId, damage, out resolvedSource);
+
+            if (resolved && resolvedSource != 0)
             {
                 sourceId = resolvedSource;
                 lock (gate)
@@ -412,6 +461,19 @@ internal sealed class DotEventCapture
                 sourceId = statusSource;
                 lock (gate)
                     inferredSource++;
+            }
+        }
+
+        // 防御性校验：当 buffId 仍未知(=0)时，不盲信 sourceId。
+        // 只有当该来源在目标身上确实存在“任意 DoT 状态”时，才允许将该 tick 计入该来源；否则回退为未知来源 DoT，避免错归因导致某些职业 DoT 异常偏高。
+        if (buffId == 0 && sourceId is > 0 and <= 0x4000_0000)
+        {
+            if (!battle.HasAnyDotFromSource(targetId, sourceId))
+            {
+                sourceId = 0;
+                rejectedNotOnTarget = true;
+                lock (gate)
+                    rejectedSourceNotOnTarget++;
             }
         }
 
@@ -481,7 +543,7 @@ internal sealed class DotEventCapture
                 evt.Damage,
                 sourceId,
                 buffId,
-                DotDropReason.None,
+                rejectedNotOnTarget ? DotDropReason.RejectedSourceNotOnTarget : DotDropReason.None,
                 DotAttributionKind.UnknownSource,
                 attributionId: buffId));
             return;
@@ -535,6 +597,7 @@ internal sealed class DotEventCapture
 
         lock (gate)
             attributedToTotalOnly++;
+        battle.AddDotTotalOnlyTick(sourceId, damage);
         battle.AddDotDamage(sourceId, damage, eventTimeMs: timeMs);
         RecordRecent(new DotRecentEvent(
             timeMs,

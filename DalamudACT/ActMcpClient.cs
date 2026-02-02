@@ -78,9 +78,10 @@ internal static class ActMcpClient
                     if (string.IsNullOrWhiteSpace(name)) continue;
 
                     var damage = GetLong(c["damage"]);
+                    var dotDamage = GetLong(c["dotDamage"]);
                     var encdps = GetDouble(c["encdps"]);
                     var dps = GetDouble(c["dps"]);
-                    combatants[name] = new ActMcpCombatantSnapshot(damage, encdps, dps);
+                    combatants[name] = new ActMcpCombatantSnapshot(damage, dotDamage, encdps, dps);
                 }
             }
 
@@ -203,4 +204,3 @@ internal static class ActMcpClient
         return sb.ToString();
     }
 }
-

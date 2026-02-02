@@ -106,6 +106,7 @@ internal class PluginUI : IDisposable
         public readonly string? Zone;
         public readonly bool CanSimDots;
         public readonly long TotalDotDamage;
+        public readonly long UnassignedDotDamage;
         public readonly long LimitDamage;
         public readonly int ParticipantCount;
         public readonly ACTBattle? Battle;
@@ -121,6 +122,7 @@ internal class PluginUI : IDisposable
             string? zone,
             bool canSimDots,
             long totalDotDamage,
+            long unassignedDotDamage,
             long limitDamage,
             int participantCount,
             ACTBattle? battle,
@@ -135,6 +137,7 @@ internal class PluginUI : IDisposable
             Zone = zone;
             CanSimDots = canSimDots;
             TotalDotDamage = totalDotDamage;
+            UnassignedDotDamage = unassignedDotDamage;
             LimitDamage = limitDamage;
             ParticipantCount = participantCount;
             Battle = battle;
@@ -151,6 +154,7 @@ internal class PluginUI : IDisposable
         var seconds = 1f;
         var canSimDots = false;
         var totalDotDamage = 0L;
+        var unassignedDotDamage = 0L;
         var limitDamage = 0L;
         var participantCount = 0;
         string? zone = null;
@@ -164,7 +168,7 @@ internal class PluginUI : IDisposable
             for (var i = 0; i < _plugin.Battles.Count; i++)
             {
                 var b = _plugin.Battles[i];
-                if (b.StartTime != 0 || b.EndTime != 0 || b.DataDic.Count != 0)
+                if (b.HasMeaningfulData())
                     battleIndices.Add(i);
             }
 
@@ -193,6 +197,7 @@ internal class PluginUI : IDisposable
                 seconds = selectedBattle.Duration();
                 canSimDots = selectedBattle.Level is >= 64 && !float.IsInfinity(selectedBattle.TotalDotSim) && selectedBattle.TotalDotSim != 0;
                 totalDotDamage = selectedBattle.TotalDotDamage;
+                unassignedDotDamage = selectedBattle.UnassignedDotDamage;
                 participantCount = selectedBattle.DataDic.Count;
                 limitDamage = selectedBattle.LimitBreak.Count > 0 ? selectedBattle.LimitBreak.Values.Sum() : 0L;
                 nameByActor = new Dictionary<uint, string>(selectedBattle.Name);
@@ -203,39 +208,89 @@ internal class PluginUI : IDisposable
                     zone = string.IsNullOrWhiteSpace(actEncounter.Zone) ? zone : actEncounter.Zone;
                     seconds = actEncounter.DurationSeconds();
                     canSimDots = false;
-                    totalDotDamage = 0L;
+                    totalDotDamage = actEncounter.CombatantsByName.Count == 0
+                        ? 0L
+                        : actEncounter.CombatantsByName.Values.Sum(static c => c.DotDamage);
+                    unassignedDotDamage = 0L;
+                    participantCount = actEncounter.CombatantsByName.Count;
                 }
 
-                Dictionary<uint, float>? dotByActor = null;
-                if (canSimDots && selectedBattle.TotalDotDamage > 0)
+                if (actEncounter != null)
                 {
-                    dotByActor = new Dictionary<uint, float>();
-                    foreach (var (active, dotDmg) in selectedBattle.DotDmgList)
+                    // PreferActMcpTotals：以 ACT combatants 列表为准，避免本地未建档导致“同职业 DoT 归零/偏高”等错觉。
+                    // 对于本地已建档的角色，沿用其 actorId/jobId/死亡与暴击率（便于高亮/tooltip/技能明细）。
+                    var nameToActor = new Dictionary<string, uint>(StringComparer.Ordinal);
+                    foreach (var (id, n) in nameByActor)
                     {
-                        var source = (uint)(active & 0xFFFFFFFF);
-                        dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                        if (!string.IsNullOrWhiteSpace(n) && !nameToActor.ContainsKey(n))
+                            nameToActor[n] = id;
+                    }
+
+                    var usedActorIds = new HashSet<uint>(nameToActor.Values);
+                    var syntheticId = 0xF000_0000u;
+                    uint AllocateSyntheticId()
+                    {
+                        while (usedActorIds.Contains(syntheticId) || syntheticId == 0xE000_0000u)
+                            syntheticId++;
+                        return syntheticId++;
+                    }
+
+                    rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(actEncounter.CombatantsByName.Count);
+                    foreach (var (combatantName, actCombatant) in actEncounter.CombatantsByName.OrderByDescending(static kv => kv.Value.Damage))
+                    {
+                        var actorId = nameToActor.TryGetValue(combatantName, out var existingId) ? existingId : AllocateSyntheticId();
+                        usedActorIds.Add(actorId);
+                        nameByActor[actorId] = combatantName;
+
+                        var jobId = 0u;
+                        var death = 0u;
+                        var dRate = -1f;
+                        var cRate = -1f;
+                        var dcRate = -1f;
+                        if (selectedBattle.DataDic.TryGetValue(actorId, out var data))
+                        {
+                            jobId = data.JobId;
+                            death = data.Death;
+                            data.Damages.TryGetValue(0, out var baseDamage);
+                            var swings = baseDamage?.swings ?? 0;
+                            if (swings != 0 && baseDamage != null)
+                            {
+                                dRate = (float)baseDamage.D / swings;
+                                cRate = (float)baseDamage.C / swings;
+                                dcRate = (float)baseDamage.DC / swings;
+                            }
+                        }
+
+                        rows.Add((actorId, jobId, actCombatant.Damage, death, dRate, cRate, dcRate));
                     }
                 }
-
-                rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(selectedBattle.DataDic.Count);
-                foreach (var (actor, damage) in selectedBattle.DataDic)
+                else
                 {
-                    var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
-                    if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
-                        totalDamage += (long)dotDamage;
+                    Dictionary<uint, float>? dotByActor = null;
+                    if (canSimDots && selectedBattle.TotalDotDamage > 0)
+                    {
+                        dotByActor = new Dictionary<uint, float>();
+                        foreach (var (active, dotDmg) in selectedBattle.DotDmgList)
+                        {
+                            var source = (uint)(active & 0xFFFFFFFF);
+                            dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                        }
+                    }
 
-                    if (actEncounter != null &&
-                        nameByActor.TryGetValue(actor, out var actorName) &&
-                        !string.IsNullOrWhiteSpace(actorName) &&
-                        actEncounter.TryGetCombatant(actorName, out var actCombatant))
-                        totalDamage = actCombatant.Damage;
+                    rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(selectedBattle.DataDic.Count);
+                    foreach (var (actor, damage) in selectedBattle.DataDic)
+                    {
+                        var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
+                        if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
+                            totalDamage += (long)dotDamage;
 
-                    damage.Damages.TryGetValue(0, out var baseDamage);
-                    var swings = baseDamage?.swings ?? 0;
-                    var dRate = swings == 0 ? -1f : (float)baseDamage!.D / swings;
-                    var cRate = swings == 0 ? -1f : (float)baseDamage!.C / swings;
-                    var dcRate = swings == 0 ? -1f : (float)baseDamage!.DC / swings;
-                    rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
+                        damage.Damages.TryGetValue(0, out var baseDamage);
+                        var swings = baseDamage?.swings ?? 0;
+                        var dRate = swings == 0 ? -1f : (float)baseDamage!.D / swings;
+                        var cRate = swings == 0 ? -1f : (float)baseDamage!.C / swings;
+                        var dcRate = swings == 0 ? -1f : (float)baseDamage!.DC / swings;
+                        rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
+                    }
                 }
             }
         }
@@ -271,6 +326,7 @@ internal class PluginUI : IDisposable
             zone,
             canSimDots,
             totalDotDamage,
+            unassignedDotDamage,
             limitDamage,
             participantCount,
             selectedBattle,
@@ -558,7 +614,7 @@ internal class PluginUI : IDisposable
                     ImGui.Separator();
                     ImGui.Text($"DoT tick 入队: {stats.EnqueuedTotal}（Legacy {stats.EnqueuedLegacy}, Network {stats.EnqueuedNetwork}）");
                     ImGui.Text($"处理: {stats.Processed}，去重丢弃: {stats.DedupDropped}，非法丢弃: {stats.DroppedInvalid}");
-                    ImGui.Text($"未知来源: {stats.UnknownSource}，buffId=0: {stats.UnknownBuff}，推断来源: {stats.InferredSource}，推断 buff: {stats.InferredBuff}");
+                    ImGui.Text($"未知来源: {stats.UnknownSource}，buffId=0: {stats.UnknownBuff}，推断来源: {stats.InferredSource}，推断 buff: {stats.InferredBuff}，拒绝src(目标无DoT): {stats.RejectedSourceNotOnTarget}");
                     ImGui.Text($"归因：Action {stats.AttributedToAction}，Status {stats.AttributedToStatus}，TotalOnly {stats.AttributedToTotalOnly}");
                     if (ImGui.SmallButton("清空 DoT 去重缓存"))
                         _plugin.ResetDotCaptureCaches();
@@ -587,6 +643,37 @@ internal class PluginUI : IDisposable
                     changed |= ImGui.Checkbox("战斗结束自动导出 BattleStats(JSONL)", ref config.AutoExportBattleStatsOnEnd);
                     ImGui.TextDisabled("用于与 ACT 做数值对齐（写入插件配置目录的 battle-stats.jsonl）。");
 
+                    changed |= ImGui.Checkbox("战斗结束自动导出 DoT 采样(DotDump/DoTStats)", ref config.AutoExportDotDumpOnEnd);
+                    ImGui.TextDisabled("写入 dot-debug.log，便于离线核对 DoT 归因与 ACT 差异。");
+                    if (config.AutoExportDotDumpOnEnd)
+                    {
+                        ImGui.Indent();
+                        var dotDumpMax = config.AutoExportDotDumpMax;
+                        if (ImGui.InputInt("DotDump 最大条数", ref dotDumpMax))
+                        {
+                            dotDumpMax = Math.Clamp(dotDumpMax, 20, 2000);
+                            if (dotDumpMax != config.AutoExportDotDumpMax)
+                            {
+                                config.AutoExportDotDumpMax = dotDumpMax;
+                                changed = true;
+                            }
+                        }
+                        ImGui.TextDisabled("建议 200；过大可能导致文件增长更快（超过 5MB 会自动滚动备份）。");
+                        ImGui.Unindent();
+                    }
+ 
+                    var timeoutMs = config.EncounterTimeoutMs;
+                    if (ImGui.InputInt("遭遇结束超时(ms)", ref timeoutMs))
+                    {
+                        timeoutMs = Math.Clamp(timeoutMs, 1000, 120000);
+                        if (timeoutMs != config.EncounterTimeoutMs)
+                        {
+                            config.EncounterTimeoutMs = timeoutMs;
+                            changed = true;
+                        }
+                    }
+                    ImGui.TextDisabled("提示：过短会在转阶段/脱战瞬间误分段；建议 10000~30000ms。");
+
                     changed |= ImGui.Checkbox("启用 ACT MCP 同步（Pipe）", ref config.EnableActMcpSync);
                     if (config.EnableActMcpSync)
                     {
@@ -595,6 +682,25 @@ internal class PluginUI : IDisposable
                         ImGui.SetNextItemWidth(260f);
                         changed |= ImGui.InputText("Pipe 名称", ref config.ActMcpPipeName, 128);
                         ImGui.TextDisabled("默认 Pipe: act-diemoe-mcp（ACT.McpPlugin）。");
+                        ImGui.Unindent();
+                    }
+
+                    ImGui.Separator();
+                    changed |= ImGui.Checkbox("实验：在游戏进程加载 ACT/FFXIV_ACT_Plugin DLL（高风险）", ref config.EnableActDllBridgeExperimental);
+                    if (config.EnableActDllBridgeExperimental)
+                    {
+                        ImGui.Indent();
+                        config.ActDieMoeRoot ??= string.Empty;
+                        ImGui.SetNextItemWidth(420f);
+                        changed |= ImGui.InputText("ACT.DieMoe 根目录", ref config.ActDieMoeRoot, 260);
+                        ImGui.TextDisabled(@"默认: C:\Program Files (x86)\宝宝轮椅\ACT.DieMoe");
+                        if (ImGui.SmallButton("探测加载（写入日志）"))
+                            _plugin.ProbeActDllBridge(tryInitPlugin: false);
+                        ImGui.SameLine();
+                        if (ImGui.SmallButton("尝试 InitPlugin（写入日志）"))
+                            _plugin.ProbeActDllBridge(tryInitPlugin: true);
+                        ImGui.TextDisabled($"上次探测: {_plugin.GetActDllProbeStatusLine()}");
+                        ImGui.TextDisabled("用途：确认是否能加载/失败原因；并不保证能在游戏进程复用 ACT 统计逻辑。");
                         ImGui.Unindent();
                     }
 
@@ -958,8 +1064,8 @@ internal class PluginUI : IDisposable
                 var actorDamageTotal = view.Rows.Sum(r => r.Damage);
 
                 var totalDamageAll = actorDamageTotal;
-                if (view.TotalDotDamage != 0 && !view.CanSimDots)
-                    totalDamageAll += view.TotalDotDamage;
+                if (view.UnassignedDotDamage != 0)
+                    totalDamageAll += view.UnassignedDotDamage;
 
                 var totalDps = view.Seconds <= 0 ? 0 : (float)totalDamageAll / view.Seconds;
                 var limitDps = view.Seconds <= 0 ? 0 : (float)view.LimitDamage / view.Seconds;
@@ -1146,30 +1252,94 @@ internal class PluginUI : IDisposable
                     limitDamage = battle.LimitBreak.Count > 0 ? battle.LimitBreak.Values.Sum() : 0L;
                     nameByActor = new Dictionary<uint, string>(battle.Name);
 
-                    Dictionary<uint, float>? dotByActor = null;
-                    if (canSimDots && battle.TotalDotDamage > 0)
+                    var actEncounter = config.PreferActMcpTotals ? battle.ActEncounter : null;
+                    if (actEncounter != null && actEncounter.CombatantsByName.Count == 0)
+                        actEncounter = null;
+                     if (actEncounter != null)
+                     {
+                         zone = string.IsNullOrWhiteSpace(actEncounter.Zone) ? zone : actEncounter.Zone;
+                         seconds = actEncounter.DurationSeconds();
+                         canSimDots = false;
+                         totalDotDamage = actEncounter.CombatantsByName.Count == 0
+                             ? 0L
+                             : actEncounter.CombatantsByName.Values.Sum(static c => c.DotDamage);
+                         participantCount = actEncounter.CombatantsByName.Count;
+                     }
+
+                    if (actEncounter != null)
                     {
-                        dotByActor = new Dictionary<uint, float>();
-                        foreach (var (active, dotDmg) in battle.DotDmgList)
+                        var nameToActor = new Dictionary<string, uint>(StringComparer.Ordinal);
+                        foreach (var (id, n) in nameByActor)
                         {
-                            var source = (uint)(active & 0xFFFFFFFF);
-                            dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                            if (!string.IsNullOrWhiteSpace(n) && !nameToActor.ContainsKey(n))
+                                nameToActor[n] = id;
+                        }
+
+                        var usedActorIds = new HashSet<uint>(nameToActor.Values);
+                        var syntheticId = 0xF000_0000u;
+                        uint AllocateSyntheticId()
+                        {
+                            while (usedActorIds.Contains(syntheticId) || syntheticId == 0xE000_0000u)
+                                syntheticId++;
+                            return syntheticId++;
+                        }
+
+                        rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(actEncounter.CombatantsByName.Count);
+                        foreach (var (combatantName, actCombatant) in actEncounter.CombatantsByName.OrderByDescending(static kv => kv.Value.Damage))
+                        {
+                            var actorId = nameToActor.TryGetValue(combatantName, out var existingId) ? existingId : AllocateSyntheticId();
+                            usedActorIds.Add(actorId);
+                            nameByActor[actorId] = combatantName;
+
+                            var jobId = 0u;
+                            var death = 0u;
+                            var dRate = -1f;
+                            var cRate = -1f;
+                            var dcRate = -1f;
+                            if (battle.DataDic.TryGetValue(actorId, out var data))
+                            {
+                                jobId = data.JobId;
+                                death = data.Death;
+                                data.Damages.TryGetValue(0, out var baseDamage);
+                                var swings = baseDamage?.swings ?? 0;
+                                if (swings != 0 && baseDamage != null)
+                                {
+                                    dRate = (float)baseDamage.D / swings;
+                                    cRate = (float)baseDamage.C / swings;
+                                    dcRate = (float)baseDamage.DC / swings;
+                                }
+                            }
+
+                            rows.Add((actorId, jobId, actCombatant.Damage, death, dRate, cRate, dcRate));
                         }
                     }
-
-                    rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(battle.DataDic.Count);
-                    foreach (var (actor, damage) in battle.DataDic)
+                    else
                     {
-                        var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
-                        if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
-                            totalDamage += (long)dotDamage;
+                        Dictionary<uint, float>? dotByActor = null;
+                        if (canSimDots && battle.TotalDotDamage > 0)
+                        {
+                            dotByActor = new Dictionary<uint, float>();
+                            foreach (var (active, dotDmg) in battle.DotDmgList)
+                            {
+                                var source = (uint)(active & 0xFFFFFFFF);
+                                dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                            }
+                        }
 
-                        damage.Damages.TryGetValue(0, out var baseDamage);
-                        var swings = baseDamage?.swings ?? 0;
-                        var dRate = swings == 0 ? -1f : (float)baseDamage!.D / swings;
-                        var cRate = swings == 0 ? -1f : (float)baseDamage!.C / swings;
-                        var dcRate = swings == 0 ? -1f : (float)baseDamage!.DC / swings;
-                        rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
+                        rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(battle.DataDic.Count);
+                        foreach (var (actor, damage) in battle.DataDic)
+                        {
+                            var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
+                            if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
+                                totalDamage += (long)dotDamage;
+
+                            damage.Damages.TryGetValue(0, out var baseDamage);
+                            var swings = baseDamage?.swings ?? 0;
+                            var dRate = swings == 0 ? -1f : (float)baseDamage!.D / swings;
+                            var cRate = swings == 0 ? -1f : (float)baseDamage!.C / swings;
+                            var dcRate = swings == 0 ? -1f : (float)baseDamage!.DC / swings;
+                            rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
+                        }
                     }
                 }
                 else if (config.CardsPlacementMode && battleCount == 0)
@@ -1193,30 +1363,94 @@ internal class PluginUI : IDisposable
                     limitDamage = battle.LimitBreak.Count > 0 ? battle.LimitBreak.Values.Sum() : 0L;
                     nameByActor = new Dictionary<uint, string>(battle.Name);
 
-                    Dictionary<uint, float>? dotByActor = null;
-                    if (canSimDots && battle.TotalDotDamage > 0)
+                    var actEncounter = config.PreferActMcpTotals ? battle.ActEncounter : null;
+                    if (actEncounter != null && actEncounter.CombatantsByName.Count == 0)
+                        actEncounter = null;
+                     if (actEncounter != null)
+                     {
+                         zone = string.IsNullOrWhiteSpace(actEncounter.Zone) ? zone : actEncounter.Zone;
+                         seconds = actEncounter.DurationSeconds();
+                         canSimDots = false;
+                         totalDotDamage = actEncounter.CombatantsByName.Count == 0
+                             ? 0L
+                             : actEncounter.CombatantsByName.Values.Sum(static c => c.DotDamage);
+                         participantCount = actEncounter.CombatantsByName.Count;
+                     }
+
+                    if (actEncounter != null)
                     {
-                        dotByActor = new Dictionary<uint, float>();
-                        foreach (var (active, dotDmg) in battle.DotDmgList)
+                        var nameToActor = new Dictionary<string, uint>(StringComparer.Ordinal);
+                        foreach (var (id, n) in nameByActor)
                         {
-                            var source = (uint)(active & 0xFFFFFFFF);
-                            dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                            if (!string.IsNullOrWhiteSpace(n) && !nameToActor.ContainsKey(n))
+                                nameToActor[n] = id;
+                        }
+
+                        var usedActorIds = new HashSet<uint>(nameToActor.Values);
+                        var syntheticId = 0xF000_0000u;
+                        uint AllocateSyntheticId()
+                        {
+                            while (usedActorIds.Contains(syntheticId) || syntheticId == 0xE000_0000u)
+                                syntheticId++;
+                            return syntheticId++;
+                        }
+
+                        rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(actEncounter.CombatantsByName.Count);
+                        foreach (var (combatantName, actCombatant) in actEncounter.CombatantsByName.OrderByDescending(static kv => kv.Value.Damage))
+                        {
+                            var actorId = nameToActor.TryGetValue(combatantName, out var existingId) ? existingId : AllocateSyntheticId();
+                            usedActorIds.Add(actorId);
+                            nameByActor[actorId] = combatantName;
+
+                            var jobId = 0u;
+                            var death = 0u;
+                            var dRate = -1f;
+                            var cRate = -1f;
+                            var dcRate = -1f;
+                            if (battle.DataDic.TryGetValue(actorId, out var data))
+                            {
+                                jobId = data.JobId;
+                                death = data.Death;
+                                data.Damages.TryGetValue(0, out var baseDamage);
+                                var swings = baseDamage?.swings ?? 0;
+                                if (swings != 0 && baseDamage != null)
+                                {
+                                    dRate = (float)baseDamage.D / swings;
+                                    cRate = (float)baseDamage.C / swings;
+                                    dcRate = (float)baseDamage.DC / swings;
+                                }
+                            }
+
+                            rows.Add((actorId, jobId, actCombatant.Damage, death, dRate, cRate, dcRate));
                         }
                     }
-
-                    rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(battle.DataDic.Count);
-                    foreach (var (actor, damage) in battle.DataDic)
+                    else
                     {
-                        var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
-                        if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
-                            totalDamage += (long)dotDamage;
+                        Dictionary<uint, float>? dotByActor = null;
+                        if (canSimDots && battle.TotalDotDamage > 0)
+                        {
+                            dotByActor = new Dictionary<uint, float>();
+                            foreach (var (active, dotDmg) in battle.DotDmgList)
+                            {
+                                var source = (uint)(active & 0xFFFFFFFF);
+                                dotByActor[source] = dotByActor.TryGetValue(source, out var cur) ? cur + dotDmg : dotDmg;
+                            }
+                        }
 
-                        damage.Damages.TryGetValue(0, out var baseDamage);
-                        var swings = baseDamage?.swings ?? 0;
-                        var dRate = swings == 0 ? -1f : (float)baseDamage!.D / swings;
-                        var cRate = swings == 0 ? -1f : (float)baseDamage!.C / swings;
-                        var dcRate = swings == 0 ? -1f : (float)baseDamage!.DC / swings;
-                        rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
+                        rows = new List<(uint Actor, uint JobId, long Damage, uint Death, float D, float C, float DC)>(battle.DataDic.Count);
+                        foreach (var (actor, damage) in battle.DataDic)
+                        {
+                            var totalDamage = damage.Damages.TryGetValue(0, out var dmg) ? dmg.Damage : 0;
+                            if (dotByActor != null && dotByActor.TryGetValue(actor, out var dotDamage))
+                                totalDamage += (long)dotDamage;
+
+                            damage.Damages.TryGetValue(0, out var baseDamage);
+                            var swings = baseDamage?.swings ?? 0;
+                            var dRate = swings == 0 ? -1f : (float)baseDamage!.D / swings;
+                            var cRate = swings == 0 ? -1f : (float)baseDamage!.C / swings;
+                            var dcRate = swings == 0 ? -1f : (float)baseDamage!.DC / swings;
+                            rows.Add((actor, damage.JobId, totalDamage, damage.Death, dRate, cRate, dcRate));
+                        }
                     }
                 }
             }
@@ -1265,11 +1499,31 @@ internal class PluginUI : IDisposable
                 pushedFont = true;
             }
 
+            ActMcpEncounterSnapshot? actEncounter = config.PreferActMcpTotals ? battle?.ActEncounter : null;
+            if (actEncounter != null && actEncounter.CombatantsByName.Count == 0)
+                actEncounter = null;
+
+            bool TryGetActDps(uint actor, out float dps)
+            {
+                dps = 0f;
+                if (actEncounter == null) return false;
+                if (!nameByActor.TryGetValue(actor, out var name) || string.IsNullOrWhiteSpace(name)) return false;
+                if (!actEncounter.TryGetCombatant(name, out var combatant)) return false;
+
+                var value = config.DpsTimeMode == 1 ? combatant.Dps : combatant.EncDps;
+                if (double.IsNaN(value) || double.IsInfinity(value) || value < 0) return false;
+                dps = (float)value;
+                return true;
+            }
+
             float GetDpsSeconds(uint actor)
                 => config.DpsTimeMode == 1 && battle != null ? battle.ActorDuration(actor) : seconds;
 
             float GetDps(long damage, uint actor)
             {
+                if (TryGetActDps(actor, out var actDps))
+                    return actDps;
+
                 var denom = GetDpsSeconds(actor);
                 return denom <= 0 ? 0f : (float)damage / denom;
             }
@@ -1490,7 +1744,7 @@ internal class PluginUI : IDisposable
                     }
                 }
 
-                if (hoveredActor != 0 && battle.DataDic.TryGetValue(hoveredActor, out var hoveredData))
+                if (hoveredActor != 0)
                 {
                     var row = rows.FirstOrDefault(r => r.Actor == hoveredActor);
                     if (row.Actor != 0)
@@ -1504,6 +1758,43 @@ internal class PluginUI : IDisposable
                         var statsText = config.ShowRates
                             ? $"直 {FormatRate(row.D)} 爆 {FormatRate(row.C)} 直暴 {FormatRate(row.DC)} 死 {row.Death:D}"
                             : $"死 {row.Death:D}";
+
+                        var hasActDot = false;
+                        long actDotDamage = 0;
+                        if (actEncounter != null &&
+                            nameByActor.TryGetValue(hoveredActor, out var actName) &&
+                            !string.IsNullOrWhiteSpace(actName) &&
+                            actEncounter.TryGetCombatant(actName, out var actCombatant))
+                        {
+                            hasActDot = true;
+                            actDotDamage = actCombatant.DotDamage;
+                        }
+
+                        if (!battle.DataDic.TryGetValue(hoveredActor, out var hoveredData))
+                        {
+                            ImGui.BeginTooltip();
+                            try
+                            {
+                                ImGui.TextColored(PrimaryTextColor, $"{rank}. {displayName}");
+                                ImGui.TextColored(SecondaryTextColor, statsText);
+                                ImGui.Separator();
+                                ImGui.TextColored(SecondaryTextColor, $"秒伤 {dps:F1}  伤害 {row.Damage:N0}");
+                                if (hasActDot)
+                                {
+                                    ImGui.TextColored(SecondaryTextColor, $"DOT伤害 {actDotDamage:N0}");
+                                    ImGui.TextColored(SecondaryTextColor, "来源: ACT");
+                                    if (row.Damage > 0)
+                                        ImGui.TextColored(SecondaryTextColor, $"DOT占比 {(double)actDotDamage / row.Damage:P1}");
+                                }
+                                ImGui.TextColored(SecondaryTextColor, "（本地无技能明细）");
+                            }
+                            finally
+                            {
+                                ImGui.EndTooltip();
+                            }
+
+                            goto TooltipDone;
+                        }
 
                         long baseTotalDamage = 0;
                         if (hoveredData.Damages.TryGetValue(0, out var totalDamage))
@@ -1525,29 +1816,19 @@ internal class PluginUI : IDisposable
                                     dotSimDamage += (long)dotDmg;
                             }
                         }
-                        long dotFallbackDamage = 0;
-                        if (dotTickDamage == 0 && dotSimDamage == 0)
-                        {
-                            foreach (var (skillId, skillDamage) in hoveredData.Damages)
-                            {
-                                if (skillId == 0 || skillDamage.Damage <= 0)
-                                {
-                                    continue;
-                                }
-
-                                if (Potency.BuffToAction.ContainsValue(skillId))
-                                {
-                                    dotFallbackDamage += skillDamage.Damage;
-                                }
-                            }
-                        }
+                        var dotTotalOnlyTickDamage = 0L;
+                        if (battle.DotTotalOnlyDamageByActor.TryGetValue(hoveredActor, out var totalOnly))
+                            dotTotalOnlyTickDamage = totalOnly;
+                        var dotTotalOnlyTickCount = 0;
+                        if (dotTotalOnlyTickDamage > 0 && battle.DotTotalOnlyTickCountByActor.TryGetValue(hoveredActor, out var totalOnlyTicks))
+                            dotTotalOnlyTickCount = totalOnlyTicks;
 
                         var dotTotal = dotTickDamage + dotSimDamage;
-                        var dotIsFallback = dotTotal == 0 && dotFallbackDamage > 0;
-                        if (dotIsFallback)
-                        {
-                            dotTotal = dotFallbackDamage;
-                        }
+                        var dotSourceText = dotSimDamage > 0 && dotTickDamage > 0
+                            ? "来源: Tick+模拟"
+                            : dotSimDamage > 0
+                                ? "来源: 模拟"
+                                : "来源: Tick";
 
                         ImGui.BeginTooltip();
                         try
@@ -1556,23 +1837,28 @@ internal class PluginUI : IDisposable
                             ImGui.TextColored(SecondaryTextColor, statsText);
                             ImGui.Separator();
                             ImGui.TextColored(SecondaryTextColor, $"秒伤 {dps:F1}  伤害 {row.Damage:N0}");
-                        if (dotTotal > 0)
+                        if (hasActDot)
                         {
-                            var dotLabel = dotIsFallback ? "DOT伤害(估算)" : "DOT伤害";
-                            var dotText = dotSimDamage > 0 && !dotIsFallback
-                                ? $"{dotLabel} {dotTotal:N0}（补正 {dotSimDamage:N0}）"
-                                : $"{dotLabel} {dotTotal:N0}";
+                            ImGui.TextColored(SecondaryTextColor, $"DOT伤害 {actDotDamage:N0}");
+                            ImGui.TextColored(SecondaryTextColor, "来源: ACT");
+                            if (row.Damage > 0)
+                                ImGui.TextColored(SecondaryTextColor, $"DOT占比 {(double)actDotDamage / row.Damage:P1}");
+                        }
+                        else if (dotTotal > 0)
+                        {
+                            var dotText = dotSimDamage > 0
+                                ? $"DOT伤害 {dotTotal:N0}（Tick {dotTickDamage:N0} + 补正 {dotSimDamage:N0}）"
+                                : $"DOT伤害 {dotTotal:N0}";
                             ImGui.TextColored(SecondaryTextColor, dotText);
-                            var dotSourceText = dotIsFallback
-                                ? "来源: 技能估算"
-                                : dotSimDamage > 0 && dotTickDamage > 0
-                                    ? "来源: Tick+模拟"
-                                    : dotSimDamage > 0
-                                        ? "来源: 模拟"
-                                        : "来源: Tick";
                             ImGui.TextColored(SecondaryTextColor, dotSourceText);
                             if (dotTickCount > 0)
                                 ImGui.TextColored(SecondaryTextColor, $"DOT tick {dotTickCount:D}");
+                            if (dotTotalOnlyTickDamage > 0)
+                                ImGui.TextColored(SecondaryTextColor, dotTotalOnlyTickCount > 0
+                                    ? $"未识别DOT tick {dotTotalOnlyTickDamage:N0}（{dotTotalOnlyTickCount:D}）"
+                                    : $"未识别DOT tick {dotTotalOnlyTickDamage:N0}");
+                            if (battle.UnassignedDotDamage > 0)
+                                ImGui.TextColored(SecondaryTextColor, $"未归因DOT {battle.UnassignedDotDamage:N0}");
                         }
                             if (dotSimDamage > 0)
                                 ImGui.TextColored(SecondaryTextColor, $"技能合计 {baseTotalDamage:N0}");
@@ -1629,6 +1915,8 @@ internal class PluginUI : IDisposable
                         {
                             ImGui.EndTooltip();
                         }
+
+                    TooltipDone: ;
                     }
                 }
             }

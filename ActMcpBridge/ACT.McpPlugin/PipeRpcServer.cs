@@ -22,10 +22,12 @@ internal sealed class PipeRpcServer : IDisposable
         MaxJsonLength = 1024 * 1024,
     };
 
+    private readonly object handlerGate = new();
+
     private readonly object gate = new();
     private CancellationTokenSource? cts;
     private Task? acceptLoop;
-    private NamedPipeServerStream? currentServer;
+    private readonly HashSet<NamedPipeServerStream> servers = new();
 
     public PipeRpcServer(
         string pipeName,
@@ -56,18 +58,26 @@ internal sealed class PipeRpcServer : IDisposable
     {
         while (!token.IsCancellationRequested)
         {
+            NamedPipeServerStream? server = null;
             try
             {
-                using var server = CreateServerStream();
-                lock (gate) currentServer = server;
+                server = CreateServerStream();
+                lock (gate) servers.Add(server);
 
                 await server.WaitForConnectionAsync().ConfigureAwait(false);
 
-                await HandleClientAsync(server, token).ConfigureAwait(false);
+                var connectedPipe = server;
+                _ = Task.Run(() => HandleClientAndDisposeAsync(connectedPipe, token));
+                server = null;
             }
             catch (ObjectDisposedException)
             {
                 // shutdown
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                return;
             }
             catch (Exception e)
             {
@@ -76,20 +86,50 @@ internal sealed class PipeRpcServer : IDisposable
             }
             finally
             {
-                lock (gate) currentServer = null;
+                if (server != null)
+                {
+                    try { server.Dispose(); } catch { /* ignored */ }
+                    lock (gate) servers.Remove(server);
+                }
             }
+        }
+    }
+
+    private async Task HandleClientAndDisposeAsync(NamedPipeServerStream pipe, CancellationToken token)
+    {
+        try
+        {
+            await HandleClientAsync(pipe, token).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // shutdown / disconnect
+        }
+        catch (IOException)
+        {
+            // client disconnected
+        }
+        catch (Exception e)
+        {
+            log($"[ACT.McpBridge] Pipe client handler error: {e.GetType().Name}: {e.Message}");
+        }
+        finally
+        {
+            try { pipe.Dispose(); } catch { /* ignored */ }
+            lock (gate) servers.Remove(pipe);
         }
     }
 
     private NamedPipeServerStream CreateServerStream()
     {
         var security = CreatePipeSecurityForCurrentUser();
+        const int maxInstances = NamedPipeServerStream.MaxAllowedServerInstances;
         if (security == null)
         {
             return new NamedPipeServerStream(
                 pipeName,
                 PipeDirection.InOut,
-                1,
+                maxInstances,
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous,
                 4096,
@@ -99,7 +139,7 @@ internal sealed class PipeRpcServer : IDisposable
         return new NamedPipeServerStream(
             pipeName,
             PipeDirection.InOut,
-            1,
+            maxInstances,
             PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous,
             4096,
@@ -184,7 +224,9 @@ internal sealed class PipeRpcServer : IDisposable
 
         try
         {
-            var result = handler(method!, @params);
+            Dictionary<string, object?> result;
+            lock (handlerGate)
+                result = handler(method!, @params);
             return Ok(id, result);
         }
         catch (PipeRpcException e)
@@ -223,16 +265,18 @@ internal sealed class PipeRpcServer : IDisposable
     {
         CancellationTokenSource? source;
         Task? loop;
-        NamedPipeServerStream? server;
+        NamedPipeServerStream[] allServers;
 
         lock (gate)
         {
             source = cts;
             loop = acceptLoop;
-            server = currentServer;
             cts = null;
             acceptLoop = null;
-            currentServer = null;
+            allServers = servers.Count == 0
+                ? Array.Empty<NamedPipeServerStream>()
+                : new List<NamedPipeServerStream>(servers).ToArray();
+            servers.Clear();
         }
 
         try
@@ -246,7 +290,10 @@ internal sealed class PipeRpcServer : IDisposable
 
         try
         {
-            server?.Dispose();
+            foreach (var server in allServers)
+            {
+                try { server.Dispose(); } catch { /* ignored */ }
+            }
         }
         catch
         {
